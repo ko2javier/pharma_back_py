@@ -1,0 +1,22 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Secretos: nunca versionar el .env real (usa .env.example como plantilla)
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+
+# SO
+.DS_Store

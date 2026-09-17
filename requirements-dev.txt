@@ -1,0 +1,18 @@
+# requirements-dev.txt — dependencias de DESARROLLO  (el <scope>test</scope> del pom.xml)
+#
+# Uso:
+#   local   ->  pip install -r requirements-dev.txt   (el -r de abajo arrastra las de produccion)
+#   Docker  ->  pip install -r requirements.txt       (solo lo que necesita la app para correr)
+
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+
+# RECORDATORIO para el paso 13: pytest-asyncio 1.x no ejecuta los tests
+# 'async def' por defecto. Hay que declarar el modo en pytest.ini o pyproject.toml:
+#
+#   [pytest]
+#   asyncio_mode = auto
+#
+# httpx ya viene de requirements.txt y es lo que usa el cliente de pruebas de FastAPI.

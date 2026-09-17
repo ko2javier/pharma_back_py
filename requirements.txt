@@ -1,0 +1,72 @@
+# requirements.txt — dependencias de EJECUCION  (las <dependency> sin scope del pom.xml)
+#
+# Revisado 2026-09-02. Todas fijadas a la version que hay instalada y probada en el .venv.
+# Las lineas "# ANTES:" son el fichero original, para ver que cambio exactamente.
+#
+# Por que fijar TODO: aqui no hay spring-boot-starter-parent que decida las versiones.
+# Sin "==", el build del Dockerfile resolvera las ultimas del dia y traera versiones
+# distintas a las tuyas. Este fichero es la unica fuente de verdad.
+
+
+# --- Framework web y servidor ASGI --------------------------------------------
+# ANTES: fastapi==0.141.1              (ya estaba fijada, sin cambios)
+fastapi==0.141.1
+# ANTES: uvicorn[standard]==0.52.4     (ya estaba fijada, sin cambios)
+uvicorn[standard]==0.52.4
+
+
+# --- Base de datos: ORM async + driver MySQL ----------------------------------
+# ANTES: sqlalchemy[asyncio]
+sqlalchemy[asyncio]==2.0.52
+# ANTES: aiomysql
+aiomysql==0.3.2
+# NOTA: no hace falta 'cryptography'. MySQL 8 usa caching_sha2_password, que
+# normalmente la exige, pero PyMySQL manda la password por el canal cifrado
+# cuando la conexion es TLS — y Aiven obliga a TLS. Verificado en _auth.py.
+
+
+# --- Validacion y configuracion -----------------------------------------------
+# ANTES: pydantic
+pydantic==2.13.5
+# ANTES: pydantic-settings
+pydantic-settings==2.15.0
+
+
+# --- Seguridad: JWT + hash de contrasenas -------------------------------------
+# ANTES: pyjwt
+PyJWT==2.13.0
+# ANTES: bcrypt
+# Comprobado contra los vectores oficiales de OpenBSD: la 5.0.0 verifica hashes
+# $2a$ generados por Spring Security, asi que los usuarios de Aiven siguen entrando.
+bcrypt==5.0.0
+
+
+# --- Cliente HTTP async (AEMPS y microservicio IA) ----------------------------
+# ANTES: httpx
+httpx==0.28.1
+
+
+# --- Migraciones ---------------------------------------------------------------
+# Se queda en produccion por si algun dia se lanza 'alembic upgrade' al arrancar
+# el contenedor. Si las migraciones las lanzas siempre tu a mano, muevela a dev.
+# ANTES: alembic
+alembic==1.19.1
+
+
+# --- QUITADAS (comentadas, no borradas: descomentar es una tecla) -------------
+#
+# ANTES: python-multipart
+# Solo hace falta para formularios y subida de ficheros. Esta API es JSON entera,
+# login incluido. Descomentala el dia que quieras el boton "Authorize" del /docs
+# con OAuth2PasswordRequestForm, que si usa form-data.
+# python-multipart==0.0.32
+#
+# ANTES: aiofiles
+# Alternativa async a open(). Ningun endpoint de este backend lee ni escribe
+# ficheros, asi que hoy no lo importa nadie.
+# aiofiles==25.1.0
+#
+# ANTES: pytest
+# ANTES: pytest-asyncio
+# Movidas a requirements-dev.txt: son el <scope>test</scope> del pom.xml y no
+# tienen que viajar dentro de la imagen Docker de produccion.
