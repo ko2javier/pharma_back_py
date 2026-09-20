@@ -298,19 +298,36 @@ y `exceptions/` (`custom.py`, `handlers.py`).
 Las mismas que ya usa el backend Java, para poder apuntar a la misma base de datos:
 
 ```
-PORT=8000
+# OJO: 8001, no 8000. En local el microservicio de IA ya ocupa el 8000, y con
+# PORT=8000 la variable IA_SERVICE_URL apuntaría a esta propia API.
+PORT=8001
+
 JWT_SECRET=
-DB_URL=            # formato SQLAlchemy: mysql+aiomysql://user:pass@host:puerto/basedatos
+
+# La conexión va por piezas, no como una URL entera (ver más abajo).
+DB_HOST=
+DB_PORT=
+DB_NAME=
 DB_USER=
 DB_PASSWORD=
+
 IA_SERVICE_URL=
 IA_SERVICE_API_KEY=
+
 ENVIRONMENT=dev
 ```
 
-**Ojo:** el formato de `DB_URL` cambia respecto a Java. Spring usa
-`jdbc:mysql://host:puerto/bd`; SQLAlchemy necesita `mysql+aiomysql://usuario:clave@host:puerto/bd`.
-Aiven además exige SSL, que se pasa aparte en `connect_args`.
+**Por qué las cinco piezas y no un `DB_URL`.** Una URL de SQLAlchemy lleva usuario y
+contraseña dentro (`mysql+aiomysql://usuario:clave@host:puerto/bd`), así que tener además
+`DB_USER` y `DB_PASSWORD` sueltos —como hacía el Java, donde JDBC los necesitaba aparte—
+deja el mismo secreto en dos sitios. Guardando las piezas, `core/config.py` compone la URL
+en la propiedad `database_url` y cada secreto se rota por su cuenta. Además, una contraseña
+con `@`, `:`, `/` o `#` rompería la URL si no va percent-encoded: al componerla en código se
+escapa una sola vez con `quote_plus()` y de forma fiable.
+
+**Ojo con el formato respecto a Java.** Spring usa `jdbc:mysql://host:puerto/bd`; SQLAlchemy
+necesita `mysql+aiomysql://usuario:clave@host:puerto/bd`. Aiven además exige SSL, que no va
+en la URL sino aparte, en el `connect_args` del engine (`core/database.py`).
 
 ---
 
@@ -339,11 +356,31 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 
 ## 8. Estado actual
 
-Ya existe en la carpeta:
+*Actualizado el 2026-09-20.*
 
-- `.venv/` con Python 3.12.3 — FastAPI 0.141.1, uvicorn 0.52.4, pydantic 2.13.5 instalados.
-- `main.py` — plantilla "Hello World" de PyCharm. **Se sustituirá por `app/main.py`.**
-- `test_main.http` — peticiones de prueba de PyCharm, se puede conservar o borrar.
-- `.idea/` — configuración de PyCharm, va al `.gitignore`.
+| Paso | Qué | Estado |
+|---|---|---|
+| 1 | Esqueleto, dependencias y arranque | Hecho y verificado |
+| 2 | `core/config.py` | Hecho y verificado — falta `core/database.py` |
+| 3 | `models/` — 6 entidades + `base.py` | Hecho y verificado |
+| 4 | `schemas/` — 7 ficheros, 14 clases Pydantic | Hecho y verificado |
+| 5–14 | Seguridad, repositorios, servicios, controladores, tests, Docker | Pendiente |
+
+Los ficheros de las capas pendientes existen vacíos, con su nombre definitivo.
+`app/main.py` arranca y `/docs` responde; todavía no hay router registrado, y la lista de
+orígenes CORS sigue escrita a mano dentro de `main.py` — ya está en `Settings.cors_origins`,
+falta cambiarla por `get_settings().cors_origins`.
+
+Verificar la configuración sin exponer la contraseña:
+
+```bash
+python -c "from app.core.config import get_settings; s=get_settings(); print(s.database_url.replace(s.db_password,'***'))"
+```
+
+**Entornos.** Este documento se escribió en el PC Linux, con un `.venv` de Python 3.12.3
+(FastAPI 0.141.1, uvicorn 0.52.4, pydantic 2.13.5). En el PC Windows el proyecto vive en
+`ko2-python-backends\pharma_back_py` y su `.venv` lo creó PyCharm con **Python 3.14.0**,
+que no es la versión contra la que están fijadas las dependencias. Tenerlo presente si
+`aiomysql` o `sqlalchemy` dan problemas al instalarse.
 
 Pendiente: todo lo demás.
