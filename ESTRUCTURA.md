@@ -360,6 +360,38 @@ prueba con el selector.
 
 ---
 
+## 6 bis. El token JWT (contrato con el frontend)
+
+Extraído de `JwtUtil.java` y `AuthController.java`. El frontend en producción **lee el rol
+del propio token**, así que estos claims no se pueden cambiar:
+
+| Claim | Valor |
+|---|---|
+| `sub` | el `username` |
+| `role` | `users.permiso` **tal cual, sin el prefijo `ROLE_`** — `"SUPERADMIN"`, no `"ROLE_SUPERADMIN"` |
+| `iat` | fecha de emisión |
+| `exp` | +10 horas |
+
+Algoritmo HS256 con `JWT_SECRET` en bytes crudos. Ojo con el `role`: Spring SÍ antepone
+`ROLE_` al construir las *authorities* (`CONCAT('ROLE_', permiso)` en el `JdbcUserDetailsManager`),
+pero dentro del token va el valor crudo. Si `deps.py` compara contra `ROLE_SUPERADMIN`, nadie
+entrará en `/activity-log`.
+
+Las contraseñas de Aiven son `$2a$10$` (BCryptPasswordEncoder, 10 rondas) y se validan sin
+migrar nada. Los hashes nuevos se generan con `bcrypt.gensalt(rounds=10, prefix=b"2a")`: el
+defecto de la librería Python es `$2b$` con 12 rondas, que es compatible pero cuesta 198 ms en
+vez de 50 y dejaría la tabla `users` con dos costes mezclados.
+
+**bcrypt va siempre en `asyncio.to_thread`.** Medido con cuatro hashes seguidos: la llamada
+directa para el bucle de eventos 821 ms —la API entera, no sólo quien hace login— y con
+`to_thread` baja a 22 ms. En Spring no pasaba porque cada petición tenía su hilo de Tomcat.
+
+**Pendiente de decidir:** `JWT_SECRET` tiene 13 bytes y PyJWT avisa en cada firma
+(`InsecureKeyLengthWarning`, el mínimo recomendado para HS256 son 32). Rotarlo obliga a
+hacerlo **a la vez en el backend Java**, que comparte el secreto y está en producción.
+
+---
+
 ## 7. Orden de construcción
 
 Se construye de dentro hacia fuera: primero lo que no depende de nada.
@@ -393,7 +425,8 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 2 | `core/config.py` + `core/database.py` | Hecho y verificado contra Aiven (`SELECT 1`, TLS con el `ca.pem`, `get_db()`) |
 | 3 | `models/` — 6 entidades + `base.py` | Hecho y verificado |
 | 4 | `schemas/` — 7 ficheros, 14 clases Pydantic | Hecho y verificado |
-| 5–14 | Seguridad, repositorios, servicios, controladores, tests, Docker | Pendiente |
+| 5 | `core/security.py` — JWT + bcrypt | Hecho y verificado (claims, caducidad, hash `$2a$10$`, rechazo de token manipulado / caducado / `alg=none`) |
+| 6–14 | Repositorios, servicios, controladores, tests, Docker | Pendiente |
 
 Los ficheros de las capas pendientes existen vacíos, con su nombre definitivo.
 `app/main.py` arranca y `/docs` responde; todavía no hay router registrado. La lista de
