@@ -315,6 +315,9 @@ IA_SERVICE_URL=
 IA_SERVICE_API_KEY=
 
 ENVIRONMENT=dev
+
+# Opcional: ruta del ca.pem de Aiven. Por defecto, ca.pem en la raíz.
+# AIVEN_CA_PATH=ca.pem
 ```
 
 **Por qué las cinco piezas y no un `DB_URL`.** Una URL de SQLAlchemy lleva usuario y
@@ -328,6 +331,32 @@ escapa una sola vez con `quote_plus()` y de forma fiable.
 **Ojo con el formato respecto a Java.** Spring usa `jdbc:mysql://host:puerto/bd`; SQLAlchemy
 necesita `mysql+aiomysql://usuario:clave@host:puerto/bd`. Aiven además exige SSL, que no va
 en la URL sino aparte, en el `connect_args` del engine (`core/database.py`).
+
+**El `ca.pem` de Aiven es obligatorio.** Aiven firma el certificado del servidor con una CA
+propia, así que `ssl.create_default_context()` a secas falla con
+`CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`. Se descarga de la
+consola de Aiven y se le pasa al contexto con `cafile=`, de modo que la conexión queda con
+`verify_mode=CERT_REQUIRED` y `check_hostname=True`. El fichero no es un secreto — es el
+certificado público de la CA — y va versionado en la raíz del repositorio; su ruta se
+declara en `Settings.aiven_ca_path`, no escrita a mano en `database.py`.
+
+Esto es **más estricto que el backend Java**, que apunta a la misma base de datos con
+`verifyServerCertificate=false`: cifra, pero no comprueba con quién habla.
+
+**El bucle de eventos importa en Windows.** uvicorn 0.36+ elige el bucle con una factoría, y
+en Windows la de por defecto es `ProactorEventLoop`, que no soporta el paso a TLS a mitad de
+conexión que exige el protocolo MySQL: la conexión a Aiven muere con un
+`OperationalError (2003)` cuya causa real es un `OSError [WinError 87]`. Por eso el bloque
+`if __name__ == "__main__"` de `main.py` arranca uvicorn con
+`loop="asyncio:SelectorEventLoop"`, y por eso esa línea **no lleva comprobación de
+plataforma**: `SelectorEventLoop` existe también en Linux, donde ya es el bucle por defecto
+(epoll). Arrancando por la línea de órdenes hace falta el mismo parámetro
+(`--loop asyncio:SelectorEventLoop`); `--reload` también vale, porque uvicorn usa subproceso
+y entonces elige el selector por su cuenta.
+
+Un aviso para depurar: el Proactor **oculta la causa real** de los fallos de handshake. El
+error de certificado de más arriba aparecía como `WinError 87` hasta que se repitió la
+prueba con el selector.
 
 ---
 
@@ -356,20 +385,21 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 
 ## 8. Estado actual
 
-*Actualizado el 2026-09-20.*
+*Actualizado el 2026-09-21.*
 
 | Paso | Qué | Estado |
 |---|---|---|
 | 1 | Esqueleto, dependencias y arranque | Hecho y verificado |
-| 2 | `core/config.py` | Hecho y verificado — falta `core/database.py` |
+| 2 | `core/config.py` + `core/database.py` | Hecho y verificado contra Aiven (`SELECT 1`, TLS con el `ca.pem`, `get_db()`) |
 | 3 | `models/` — 6 entidades + `base.py` | Hecho y verificado |
 | 4 | `schemas/` — 7 ficheros, 14 clases Pydantic | Hecho y verificado |
 | 5–14 | Seguridad, repositorios, servicios, controladores, tests, Docker | Pendiente |
 
 Los ficheros de las capas pendientes existen vacíos, con su nombre definitivo.
-`app/main.py` arranca y `/docs` responde; todavía no hay router registrado, y la lista de
-orígenes CORS sigue escrita a mano dentro de `main.py` — ya está en `Settings.cors_origins`,
-falta cambiarla por `get_settings().cors_origins`.
+`app/main.py` arranca y `/docs` responde; todavía no hay router registrado. La lista de
+orígenes CORS ya sale de `Settings.cors_origins` (antes estaba escrita a mano dentro del
+middleware, duplicada), y `main.py` tiene un bloque `if __name__ == "__main__"` que arranca
+uvicorn con el bucle de eventos correcto.
 
 Verificar la configuración sin exponer la contraseña:
 

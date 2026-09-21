@@ -4,9 +4,16 @@
 # Una sola clase declara TODA la configuración de la aplicación.
 
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# La raiz del proyecto, calculada desde este fichero: app/core/config.py -> ../..
+# Hace falta para resolver rutas relativas sin depender del directorio desde el
+# que se arranque uvicorn. Es lo que en Spring te daba el classpath: un
+# classpath:ca.pem se encuentra siempre, "./ca.pem" sólo si el cwd acompaña.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -44,6 +51,19 @@ class Settings(BaseSettings):
     db_user: str
     db_password: str
 
+    # ── Certificado de la CA de Aiven ─────────────────────────────────────
+    #
+    # Aiven firma el certificado del servidor con una CA propia, que no está en
+    # el almacén de confianza del sistema. Sin este fichero, el handshake TLS
+    # muere con "CERTIFICATE_VERIFY_FAILED: self-signed certificate in
+    # certificate chain". Es el equivalente al truststore de Java.
+    #
+    # SÍ lleva valor por defecto (al contrario que los secretos): el fichero
+    # viaja en el repositorio, no es un secreto, y la ruta es siempre la misma.
+    # Se declara aqui y no a mano en database.py para poder apuntar a otra ruta
+    # por entorno -- en la imagen Docker estará en /app/ca.pem.
+    aiven_ca_path: Path = Path("ca.pem")
+
     # ── Microservicio de IA ───────────────────────────────────────────────
     #
     # INCORRECTO (lo que había antes):
@@ -79,9 +99,6 @@ class Settings(BaseSettings):
 
     # ── Origen de los valores ─────────────────────────────────────────────
     #
-    # INCORRECTO (lo que había antes):
-    #     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
-    #
     # Faltaba extra="ignore". Por defecto pydantic-settings RECHAZA cualquier
     # variable del .env que la clase no declare: eran los cinco errores
     # "Extra inputs are not permitted". Con "ignore", el .env puede llevar
@@ -100,6 +117,15 @@ class Settings(BaseSettings):
     #
     # quote_plus() escapa la contraseña. Si contiene @ : / o #, sin escapar
     # partiría la URL por el sitio equivocado y el error sería indescifrable.
+    # Ruta absoluta del ca.pem. Si en el .env se pone una ruta relativa, se
+    # resuelve contra la raíz del proyecto y no contra el directorio actual:
+    # arrancar uvicorn desde otra carpeta dejaría de encontrarlo.
+    @property
+    def aiven_ca_file(self) -> Path:
+        if self.aiven_ca_path.is_absolute():
+            return self.aiven_ca_path
+        return _PROJECT_ROOT / self.aiven_ca_path
+
     @property
     def database_url(self) -> str:
         return (
