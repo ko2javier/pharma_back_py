@@ -261,7 +261,7 @@ y `exceptions/` (`custom.py`, `handlers.py`).
 | GET | `/users/{username}` | autenticado | `UserController` |
 | POST | `/users/insert` | ADMIN solo puede crear SELLER | `UserController` |
 | PUT | `/users/update` | ADMIN no puede tocar ADMIN/SUPERADMIN | `UserController` |
-| DELETE | `/users/{id}` | ADMIN no puede borrar ADMIN/SUPERADMIN | `UserController` |
+| DELETE | `/users/{id}` | ADMIN no puede borrar ADMIN/SUPERADMIN | `UserController` — **borrado lógico, ver nota** |
 | GET | `/articulos/All` | autenticado | `ArticuloController` |
 | GET | `/articulos/search/{keyword}` | autenticado | `ArticuloController` |
 | POST | `/articulos/insert` | autenticado | `ArticuloController` |
@@ -280,6 +280,27 @@ y `exceptions/` (`custom.py`, `handlers.py`).
 | GET | `/api/cima/medicamento?nregistro=` | autenticado | `CimaController` |
 | GET | `/api/cima/buscar` | autenticado | `CimaController` |
 | GET | `/api/cima/validar?nombre=` | autenticado | `CimaController` |
+
+### Nota sobre `DELETE /users/{id}`: borrado lógico, no físico
+
+**Desviación deliberada respecto al Java.** `UserController.java` borra la fila de
+verdad. Aquí no: `users` tiene dos claves foráneas con `ON DELETE CASCADE` hacia
+`authorities.username` y `ventas.id_username` (comprobado contra el
+`information_schema` real de Aiven), así que un `DELETE` físico se llevaría por
+delante **todo el historial de ventas** del usuario sin avisar. Se descubrió
+probando el borrado contra la base de datos real.
+
+`UserService.delete_user_by_id` pone `enabled=False` en vez de borrar la fila.
+Con eso:
+- el usuario deja de poder autenticarse (`authenticate_user` comprueba `enabled`
+  después de la contraseña, no antes, para no filtrar por *timing* si la cuenta
+  existe pero está deshabilitada),
+- sus ventas y su rastro en `activity_log` quedan intactos,
+- la fila de `authorities` **no se toca**: la comparte el backend Java, y su
+  propio login también debe seguir respetando `enabled=False`.
+
+`UserRepository.delete` (el `DELETE` físico) se deja en el repositorio como
+equivalente genérico de `JpaRepository.delete`, pero el `service` ya no lo llama.
 
 ### Flujo de `/api/cima/validar` (el más complejo)
 
@@ -417,7 +438,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 
 ## 8. Estado actual
 
-*Actualizado el 2026-09-21.*
+*Actualizado el 2026-09-26.*
 
 | Paso | Qué | Estado |
 |---|---|---|
@@ -426,7 +447,15 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 3 | `models/` — 6 entidades + `base.py` | Hecho y verificado |
 | 4 | `schemas/` — 7 ficheros, 14 clases Pydantic | Hecho y verificado |
 | 5 | `core/security.py` — JWT + bcrypt | Hecho y verificado (claims, caducidad, hash `$2a$10$`, rechazo de token manipulado / caducado / `alg=none`) |
-| 6–14 | Repositorios, servicios, controladores, tests, Docker | Pendiente |
+| 6 | Login: `user_repository.py`, `user_service.py` hechos y verificados contra Aiven. Falta `activity_log_service.py` (mínimo) y `auth_controller.py` | En curso |
+| 7–14 | Dependencias/roles, CRUD resto de entidades, tests, Docker | Pendiente |
+
+**Adelantado del paso 11:** `activity_log_repository.py` (`save` + `find_all_ordered`), porque el login necesita registrar `LOGIN_SUCCESS`/`LOGIN_FAILED` desde el principio.
+
+**Bug encontrado y corregido en el paso 6, probando contra Aiven:** `authenticate_user`
+no comprobaba `user.enabled` — un usuario deshabilitado seguía pudiendo entrar con la
+contraseña correcta. Corregido comprobando `enabled` después de la contraseña. Ver
+también la nota de `DELETE /users/{id}` en la §5, que depende del mismo campo.
 
 Los ficheros de las capas pendientes existen vacíos, con su nombre definitivo.
 `app/main.py` arranca y `/docs` responde; todavía no hay router registrado. La lista de
