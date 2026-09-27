@@ -438,7 +438,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 
 ## 8. Estado actual
 
-*Actualizado el 2026-09-26.*
+*Actualizado el 2026-09-27.*
 
 | Paso | Qué | Estado |
 |---|---|---|
@@ -447,8 +447,9 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 3 | `models/` — 6 entidades + `base.py` | Hecho y verificado |
 | 4 | `schemas/` — 7 ficheros, 14 clases Pydantic | Hecho y verificado |
 | 5 | `core/security.py` — JWT + bcrypt | Hecho y verificado (claims, caducidad, hash `$2a$10$`, rechazo de token manipulado / caducado / `alg=none`) |
-| 6 | Login: `user_repository.py`, `user_service.py` hechos y verificados contra Aiven. Falta `activity_log_service.py` (mínimo) y `auth_controller.py` | En curso |
-| 7–14 | Dependencias/roles, CRUD resto de entidades, tests, Docker | Pendiente |
+| 6 | Login completo: `user_repository.py`, `activity_log_repository.py`, `user_service.py`, `activity_log_service.py`, `auth_controller.py` | Hecho y verificado contra Aiven (`/auth/login` real desde `/docs`) |
+| 7 | `api/deps.py` — `get_db`, `get_current_user`, `require_role(*roles)` | Hecho y verificado (`/auth/protected` exige token válido, rechaza ausente/manipulado con 401) |
+| 8–14 | Errores propios, CRUD resto de entidades, ventas, activity log completo, AEMPS/IA, tests, Docker | Pendiente |
 
 **Adelantado del paso 11:** `activity_log_repository.py` (`save` + `find_all_ordered`), porque el login necesita registrar `LOGIN_SUCCESS`/`LOGIN_FAILED` desde el principio.
 
@@ -457,11 +458,28 @@ no comprobaba `user.enabled` — un usuario deshabilitado seguía pudiendo entra
 contraseña correcta. Corregido comprobando `enabled` después de la contraseña. Ver
 también la nota de `DELETE /users/{id}` en la §5, que depende del mismo campo.
 
-Los ficheros de las capas pendientes existen vacíos, con su nombre definitivo.
-`app/main.py` arranca y `/docs` responde; todavía no hay router registrado. La lista de
-orígenes CORS ya sale de `Settings.cors_origins` (antes estaba escrita a mano dentro del
-middleware, duplicada), y `main.py` tiene un bloque `if __name__ == "__main__"` que arranca
-uvicorn con el bucle de eventos correcto.
+**Tres bugs más encontrados y corregidos cerrando los pasos 6 y 7 (2026-09-27):**
+- `activity_log_service.py` se escribió bien pero se guardó en `articulo_service.py`
+  (la cabecera `# app/services/activity_log_service.py` no coincidía con la ruta real
+  del fichero — la pestaña de PyCharm no era la que se creía). Movido a su sitio;
+  `articulo_service.py` vuelve a quedar vacío, tal como estaba en el commit anterior
+  (paso 9, aún pendiente).
+- `auth_controller.py` llamaba a `create_access_token(data={"sub": ..., "rol": ...})`,
+  la firma vieja (`dict` libre) que se eliminó a propósito en el paso 5 — reventaba con
+  `TypeError` en cuanto se ejecutaba un login. Corregido a
+  `create_access_token(username=..., role=...)`.
+- `api/deps.py` importaba `from jose import JWTError, jwt` (librería no instalada vía
+  `requirements.txt`; quedó suelta en el `.venv` de seguir el tutorial oficial de
+  FastAPI) y `from app.core.config import settings` (no existe: solo hay
+  `get_settings()`) con `settings.SECRET_KEY` (el campo real es `jwt_secret`). Corregido
+  reutilizando `decode_access_token()` de `core/security.py`, que ya validaba el JWT
+  desde el paso 5. No hizo falta tocar `requirements.txt`: la librería correcta
+  (`PyJWT`) ya estaba declarada.
+
+`app/main.py` ya registra el router (`app.include_router(api_router)`, antes comentado
+como `TODO (paso 1)`) y `app/api/routes/router.py` ya no está vacío: agrupa
+`auth_controller` con `APIRouter().include_router(...)`. La lista de orígenes CORS sale
+de `Settings.cors_origins`, y `main.py` arranca uvicorn con el bucle de eventos correcto.
 
 Verificar la configuración sin exponer la contraseña:
 

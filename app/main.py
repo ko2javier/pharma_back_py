@@ -4,8 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 
-# Más adelante, cuando tengamos los controladores, importaremos el enrutador principal:
-# from app.api.routes.router import api_router
+from app.api.routes.router import api_router
 
 settings = get_settings()
 
@@ -38,8 +37,7 @@ app.add_middleware(
     allow_headers=["*"],  # setAllowedHeaders(List.of("*")) en el Java
 )
 
-# Aquí registraremos todos los "Controladores" más adelante
-# app.include_router(api_router)
+app.include_router(api_router)
 
 
 # Un endpoint de prueba para comprobar que el servidor arranca bien
