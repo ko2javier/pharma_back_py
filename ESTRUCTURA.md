@@ -485,6 +485,32 @@ no aplana los routers incluidos** — aparecen como un único objeto `_IncludedR
 recorrer `app.routes` buscando las rutas de `/articulos` no encuentra nada y parece que no
 están registradas. La fuente de verdad es `app.openapi()["paths"]`.
 
+### Dos `get_db` gastaban el doble de conexiones (encontrado y corregido el 2026-09-28)
+
+Salió al preguntar "¿no queda nada?" y revisar el proyecto entero en vez de fichero a fichero.
+
+`api/deps.py` definía **su propio `get_db`**, copia del de `core/database.py` (paso 2). Casi
+el mismo código —de hecho aquí había quedado la versión con el `try/finally` redundante que
+allí ya se había corregido—, pero **FastAPI cachea las dependencias por identidad de la
+función**: dos funciones distintas son dos dependencias distintas, así que una misma petición
+abría **dos sesiones y dos conexiones**, una para el `session = Depends(get_db)` del endpoint
+(que importaba el de `core.database`) y otra para la de `get_current_user`.
+
+Medido con un listener `checkout` del pool: `GET /articulos/All` gastaba **2 de las 3**
+conexiones (`pool_size=3, max_overflow=0`, fijado por la cuota de Aiven), así que cabía **una
+sola petición autenticada simultánea** en vez de tres. Tras importar el `get_db` de
+`core/database.py` en vez de redefinirlo: **1 conexión, 3 peticiones**.
+
+Antes del arreglo del paso 9 esto afectaba sólo a `/insert` y `DELETE /{id}` (los dos únicos
+que pedían token y además su propia sesión). Al añadir
+`dependencies=[Depends(get_current_user)]` en el `APIRouter` para cerrar el agujero de
+autenticación, pasó a afectar a **los siete**: arreglar una cosa amplió la otra. Los dos
+arreglos son correctos, pero hay que mirarlos juntos.
+
+**Regla para el resto de la migración:** una sola definición de cada dependencia, y `deps.py`
+importa de `core/`, nunca reimplementa. Si un endpoint necesita sesión y usuario, las dos
+dependencias tienen que resolverse al mismo objeto función.
+
 **Pendiente de decisión (no es un descuido):** `DELETE /articulos/{id}` es un borrado físico y
 **se lleva por delante el historial de ventas del artículo**. Comprobado en
 `information_schema` de Aiven: `fk_articulos_ventas`, `ventas.codigo` → `articulos.codigo`,

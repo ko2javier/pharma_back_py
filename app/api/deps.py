@@ -1,5 +1,8 @@
 # app/api/deps.py
-from typing import AsyncGenerator
+# OBSOLETO: from typing import AsyncGenerator
+# Sólo lo usaba la firma del get_db duplicado que se ha quitado de aquí (y en
+# core/database.py se importa de collections.abc, no de typing: el de typing
+# está deprecado desde Python 3.9).
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +24,7 @@ import jwt  # PyJWT, no python-jose
 #      SECRET_KEY.
 
 # Importaciones de tu proyecto
-from app.core.database import AsyncSessionLocal
+from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models.user_model import Users
 from app.repositories.user_repository import UserRepository
@@ -34,14 +37,33 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 # -------------------------------------------------------------------
 # 1. DEPENDENCIA DE BASE DE DATOS (El EntityManager)
 # -------------------------------------------------------------------
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Genera una sesión de base de datos por cada petición HTTP"""
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            # Siempre se cierra, pase lo que pase
-            await session.close()
+#
+# OBSOLETO — este fichero definía su PROPIO get_db, copia del de
+# core/database.py (paso 2):
+#
+#     async def get_db() -> AsyncGenerator[AsyncSession, None]:
+#         """Genera una sesión de base de datos por cada petición HTTP"""
+#         async with AsyncSessionLocal() as session:
+#             try:
+#                 yield session
+#             finally:
+#                 await session.close()
+#
+# Parecía inofensivo (el código es casi el mismo, y de hecho aquí quedó la
+# versión con el try/finally redundante que ya se había corregido allí), pero
+# FastAPI cachea las dependencias por IDENTIDAD de la función, no por nombre ni
+# por lo que hagan. Dos funciones distintas = dos dependencias distintas = DOS
+# sesiones y DOS conexiones del pool en la misma petición: una para el
+# "session: AsyncSession = Depends(get_db)" del endpoint (que importaba el de
+# core.database) y otra para la que usa get_current_user aquí dentro.
+#
+# Medido con un listener "checkout" del pool: GET /articulos/All gastaba 2 de
+# las 3 conexiones (pool_size=3, max_overflow=0, fijado por la cuota de Aiven),
+# así que cabía UNA sola petición autenticada simultánea en vez de tres.
+#
+# Importando el de core/database.py hay un único objeto función, FastAPI lo
+# reconoce como la misma dependencia y la reutiliza. Es la diferencia entre
+# tener un @PersistenceContext y tener dos EntityManager en la misma petición.
 
 
 # -------------------------------------------------------------------
