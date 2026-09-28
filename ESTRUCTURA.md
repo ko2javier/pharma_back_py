@@ -148,8 +148,8 @@ farmacia-ko2-back_fastApi/
 │   │
 │   └── exceptions/                   ← paquete exception/
 │       ├── __init__.py
-│       ├── custom.py                 ← ResourceNotFoundException + ExternalServiceException
-│       └── handlers.py               ← GlobalExceptionHandler (@app.exception_handler)
+│       ├── custom.py                 ← 4 excepciones (ver §8 bis), no las 2 del Java
+│       └── handlers.py               ← GlobalExceptionHandler (app.add_exception_handler)
 │
 ├── tests/                            ← src/test/java/
 │   ├── __init__.py
@@ -449,7 +449,50 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 5 | `core/security.py` — JWT + bcrypt | Hecho y verificado (claims, caducidad, hash `$2a$10$`, rechazo de token manipulado / caducado / `alg=none`) |
 | 6 | Login completo: `user_repository.py`, `activity_log_repository.py`, `user_service.py`, `activity_log_service.py`, `auth_controller.py` | Hecho y verificado contra Aiven (`/auth/login` real desde `/docs`) |
 | 7 | `api/deps.py` — `get_db`, `get_current_user`, `require_role(*roles)` | Hecho y verificado (`/auth/protected` exige token válido, rechaza ausente/manipulado con 401) |
-| 8–14 | Errores propios, CRUD resto de entidades, ventas, activity log completo, AEMPS/IA, tests, Docker | Pendiente |
+| 8 | `exceptions/custom.py` + `exceptions/handlers.py`, registrados en `main.py` | Hecho y verificado (6 excepciones → 404/404/409/409/502/500, y siguen saliendo el 200 de `/` y el 401 de `/auth/protected`) |
+| 9 | Artículos: `articulo_repository.py`, `articulo_service.py`, `articulo_controller.py` + alta en `router.py` | Hecho y verificado (20 comprobaciones: 7 rutas en el OpenAPI, las 7 dan 401 sin token, y 6 casos de excepción→HTTP contra Aiven) |
+| 10–14 | Ventas, activity log completo, AEMPS/IA, usuarios, tests, Docker | Pendiente |
+
+### Paso 9 — lo que se corrigió al revisarlo (2026-09-28)
+
+Escrito por Jabier, revisado y corregido. Cinco cosas, dos de ellas bloqueantes:
+
+1. **`from app.api.dependencies.auth_deps import get_current_username`** — `ModuleNotFoundError`:
+   ese paquete no existe. Es `app/api/deps.py` (paso 7) y la función es `get_current_user`,
+   que devuelve la entidad `Users`, no un `str`. **Tercera vez que aparece este patrón** (tras
+   `from jose import` y `create_access_token(data=...)`): un import a un nombre plausible que
+   nadie ha escrito. Sólo se caza ejecutando el fichero.
+2. **`router.py` no incluía el router de artículos** — los siete endpoints no existían aunque
+   el controlador estuviera completo. Es el equivalente a que Spring no escanee el
+   `@RestController`.
+3. **Cinco de los siete endpoints quedaban sin autenticar** (sólo `/insert` y `DELETE /{id}` la
+   pedían). En el Java no hace falta declararlo ruta por ruta porque `SecurityConfig` acaba en
+   `.anyRequest().authenticated()`. Se arregla con `dependencies=[Depends(get_current_user)]`
+   en el `APIRouter`, que es el equivalente exacto; FastAPI cachea la dependencia por petición,
+   así que los dos endpoints que además necesitan el usuario no provocan una segunda consulta.
+4. **El paso 8 no se estaba usando**: el servicio lanzaba `ValueError` y el controlador lo
+   traducía con tres `try/except`. Ahora lanza `ResourceNotFoundException` /
+   `InsufficientStockException` y no queda ni un `try/except` en el controlador. De paso
+   arregla que el mismo "no encontrado" saliera 400 en `/updateStock` y 404 en `/updateItem`.
+5. **`ilike` → `like`** en `find_by_nombre_containing`: el comentario decía que `ilike` hacía
+   falta para ignorar mayúsculas, pero en MySQL eso lo decide la *collation* de la columna
+   (`utf8mb4_..._ci`), no el operador. `ilike` no existe en MySQL y SQLAlchemy lo compila a
+   `LOWER(nombre) LIKE LOWER(%s)`, que impide usar el índice. Y `exists_by_id` devolvía el
+   `1`/`0` de MySQL con la firma declarada `-> bool`.
+
+**Trampa nueva al verificar, importante para el paso 13:** en FastAPI 0.141.1 **`app.routes` ya
+no aplana los routers incluidos** — aparecen como un único objeto `_IncludedRouter`, así que
+recorrer `app.routes` buscando las rutas de `/articulos` no encuentra nada y parece que no
+están registradas. La fuente de verdad es `app.openapi()["paths"]`.
+
+**Pendiente de decisión (no es un descuido):** `DELETE /articulos/{id}` es un borrado físico y
+**se lleva por delante el historial de ventas del artículo**. Comprobado en
+`information_schema` de Aiven: `fk_articulos_ventas`, `ventas.codigo` → `articulos.codigo`,
+`DELETE RULE: CASCADE`. Es el mismo caso que saltó con `users` en el paso 6, donde se pasó a
+borrado lógico (`enabled=False`), pero `articulos` **no tiene columna `enabled`** y añadirla
+es un cambio manual de esquema (`ddl-auto=none`) en la BD que comparte con el backend Java en
+producción. El Java hace este mismo DELETE, así que por ahora se replica y queda avisado con
+un comentario en el endpoint.
 
 **Adelantado del paso 11:** `activity_log_repository.py` (`save` + `find_all_ordered`), porque el login necesita registrar `LOGIN_SUCCESS`/`LOGIN_FAILED` desde el principio.
 
@@ -486,6 +529,132 @@ Verificar la configuración sin exponer la contraseña:
 ```bash
 python -c "from app.core.config import get_settings; s=get_settings(); print(s.database_url.replace(s.db_password,'***'))"
 ```
+
+---
+
+## 8 bis. Los errores (paso 8) — lo que el Java hacía de verdad
+
+Leyendo `GlobalExceptionHandler.java` y cruzándolo con el frontend Angular (2026-09-28):
+**de sus cinco handlers sólo se disparaban dos.**
+
+| Handler del Java | HTTP | ¿Se lanzaba? |
+|---|---|---|
+| `ExternalServiceException` | 502 | **Sí** — `CimaController`, en los tres `catch` del `RestTemplate` |
+| `OptimisticLockException` | 409 | **Sí** — la lanza Hibernate solo, por el `@Version` de `Articulos` |
+| `Exception` (genérico) | 500 | **Sí**, y de más: se come todos los `RuntimeException` de abajo |
+| `ResourceNotFoundException` | 404 | **No.** Clase declarada, handler escrito, `throw` en ningún sitio |
+| `IllegalArgumentException` | 400 | **No.** Nada del proyecto la lanza |
+
+Los "no encontrado" de verdad (`ArticuloService` líneas 39, 52, 96, 104; `UserService` 46)
+lanzan `RuntimeException` pelado → caen en el genérico → **el cliente recibe un 500**, no
+un 404.
+
+Y los 409/404 que el frontend sí mira **no pasan por el handler**: son
+`ResponseEntity.status(...)` escritos a mano en el controlador
+(`CimaController.validarMedicamento` para "producto ya existe" y "sin resultados en AEMPS",
+`UserController.insertarUsuario` para "el usuario ya existe").
+
+**El frontend nunca lee el cuerpo del error, sólo `err.status`.** En todo `src/app` hay
+exactamente cuatro comprobaciones de código: 401/403 en `auth.interceptor.ts` (borra el token
+y va a login), y tres 409 con mensaje propio hardcodeado en Angular
+(`almacen.component.ts:307` + su 404 de AEMPS en la línea 309, `carritocomponent.ts:189`
+para el conflicto de stock, `users.component.ts:199` para el usuario duplicado). El resto de
+errores cae en un `else` genérico. **Consecuencia: la forma del JSON de error es libre**
+(el Java mezclaba `{"error":...}`, `{"mensaje":...}` y strings sueltos), y devolver 404 donde
+el Java daba 500 no rompe nada.
+
+Por eso en Python hay **cinco** excepciones y no dos:
+
+| `exceptions/custom.py` | HTTP | Para qué |
+|---|---|---|
+| `ResourceNotFoundException` | 404 | Artículo/usuario/venta que no existe. **Desviación deliberada**: en el Java esto era un 500 |
+| `DuplicateResourceException` | 409 | Unifica los dos chequeos de duplicado que el Java tenía sueltos en cada controlador |
+| `InsufficientStockException` | 409 | No hay unidades para vender. En el Java iba en el MISMO `throw` que el "no encontrado" (`ArticuloService.java:39`) y salía 500 |
+| `AempsNotFoundException` | 404 | AEMPS sin resultados — mismo código que la primera, pero es otro caso (no falta en *nuestra* BD) |
+| `ExternalServiceException` | 502 | AEMPS o el microservicio IA caídos. Único nombre copiado tal cual del Java |
+
+Más, en `handlers.py` y sin clase propia: `StaleDataError` de SQLAlchemy → **409**, que es el
+equivalente async del `OptimisticLockException` de Hibernate (la lanza el flush/commit cuando
+el `version_id_col` de la fila ya no es el que se leyó), y `Exception` → 500 con el traceback
+al log y nunca al cliente.
+
+No se replica el handler de `IllegalArgumentException` (400): en el Java no lo lanza nadie, y
+aquí la validación de entrada ya la hace Pydantic con un 422.
+
+**Registro a mano.** FastAPI no tiene `@RestControllerAdvice`: los handlers se enganchan con
+`app.add_exception_handler(...)`, agrupados en `register_exception_handlers(app)` y llamados
+desde `main.py`. Comprobado que el handler de `Exception` **no** tapa las respuestas normales
+de FastAPI: `/auth/protected` sin token sigue dando su 401 `{"detail":"Not authenticated"}`,
+porque Starlette busca el handler recorriendo el MRO y `HTTPException` tiene el suyo propio.
+
+**Trampa al verificarlo**: `TestClient(app)` re-lanza la excepción no controlada en vez de
+dejar que el handler genérico la convierta en 500. Hace falta
+`TestClient(app, raise_server_exceptions=False)` para ver el 500 de verdad.
+
+---
+
+## 9. Los tests (paso 13) — decisión cerrada el 2026-09-28
+
+**No se usa SQLite como "el H2 de los tests".** Esta frase estaba en este documento y en la
+memoria desde el paso 3; queda anulada por lo de abajo. Sigue valiendo para una comprobación
+suelta de un `INSERT` a mano mientras se escribe una capa, pero **no** como base de datos de
+la batería de tests.
+
+Motivo, con dos pruebas de la propia migración: los dos peores bugs encontrados hasta ahora
+son cascadas de borrado (`fk_usuario_ventas` en el paso 6, `fk_articulos_ventas` en el 9), y
+**los dos pasan en verde sobre SQLite**, por dos razones que se suman:
+
+1. **SQLite ignora las claves ajenas** salvo `PRAGMA foreign_keys=ON` en *cada* conexión.
+2. Y aunque se active: **los modelos Python no declaran esas FK** (ver `venta_model.py`:
+   `codigo` es un `String(13)` pelado, sin `ForeignKey`). Un `Base.metadata.create_all()`
+   construye por tanto un esquema **sin** esas cascadas.
+
+Es consecuencia directa de `ddl-auto=none`: el esquema real de Aiven se hizo a mano y tiene
+constraints que los modelos no conocen. Cualquier test que se cree su propio esquema prueba
+una base de datos que no existe. (De propina: el `LIKE` de SQLite sólo ignora mayúsculas en
+ASCII, así que divergiría de la collation `utf8mb4_..._ci` en nombres con acentos o `ñ`.)
+
+### Los tres niveles
+
+| Nivel | Equivalente Java | Qué prueba | BD |
+|---|---|---|---|
+| 1. Unitario con mocks | JUnit + Mockito | `core/security.py` (claims, caducidad, `alg=none`), `_generar_codigo_unico`, reglas de los servicios | Ninguna |
+| 2. Contrato HTTP | `@WebMvcTest` + `@MockBean` | los 401/403/404/409, las claves camelCase, que cada ruta exija token | Ninguna |
+| 3. Integración | `@SpringBootTest` + **Testcontainers** | las cascadas, la collation, el bloqueo optimista, las transacciones | MySQL real |
+
+**Los niveles 1 y 2 desde el primer día; el 3 sólo para la media docena de casos donde MySQL
+importa de verdad.** Se llegará al nivel 3 si da tiempo — no es requisito para cerrar el paso 13.
+
+El nivel 2 ya se está usando de hecho en los scripts de verificación de los pasos 8 y 9:
+`app.dependency_overrides[get_current_user] = ...` es literalmente el `@MockBean` de Spring, y
+`httpx.AsyncClient(ASGITransport(app=app))` el `MockMvc`. Cubre todo el contrato con el
+frontend Angular (que sólo mira el `status`, ver §8 bis) sin tocar Aiven.
+
+Para el nivel 3, el equivalente honesto de H2 es **Testcontainers** (`testcontainers[mysql]`):
+levanta un MySQL en Docker, se le carga el esquema real y ahí sí aparecen las cascadas. La
+alternativa sin Docker es una segunda base de datos en el mismo Aiven, pero entonces los tests
+dependen de la red.
+
+### Vocabulario
+
+| Java | Python |
+|---|---|
+| JUnit | `pytest` |
+| `@Mock` / `when().thenReturn()` | `unittest.mock.AsyncMock` |
+| `@MockBean` | `app.dependency_overrides[dep] = ...` |
+| `MockMvc` | `httpx.AsyncClient(ASGITransport(app))` |
+| `@BeforeEach` | `@pytest.fixture` |
+| `@Test` sobre método async | `@pytest.mark.asyncio` |
+
+`pytest` y `pytest-asyncio` ya están en `requirements-dev.txt` desde el paso 1 (fuera de la
+imagen Docker), y `tests/conftest.py` existe vacío esperando las fixtures.
+
+**Trampa ya conocida para cuando se escriban:** en FastAPI 0.141.1 `app.routes` no aplana los
+routers incluidos, así que para comprobar qué rutas hay registradas se usa
+`app.openapi()["paths"]`. Y `TestClient` re-lanza la excepción no controlada en vez de dejar
+que el handler dé el 500: hace falta `raise_server_exceptions=False`.
+
+---
 
 **Entornos.** Este documento se escribió en el PC Linux, con un `.venv` de Python 3.12.3
 (FastAPI 0.141.1, uvicorn 0.52.4, pydantic 2.13.5). En el PC Windows el proyecto vive en

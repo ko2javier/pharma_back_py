@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 
 from app.api.routes.router import api_router
+from app.exceptions.handlers import register_exception_handlers
 
 settings = get_settings()
 
@@ -38,6 +39,11 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+# Equivale a que GlobalExceptionHandler.java sea un @RestControllerAdvice: sin
+# esto, cada excepción propia (ver app/exceptions/) reventaría como un 500 sin
+# formato en vez del código HTTP que le corresponde.
+register_exception_handlers(app)
 
 
 # Un endpoint de prueba para comprobar que el servidor arranca bien
