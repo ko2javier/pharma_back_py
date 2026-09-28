@@ -428,6 +428,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 7 | Dependencias de autenticación y roles | `api/deps.py` |
 | 8 | Errores propios | `exceptions/*` |
 | 9 | CRUD de artículos | `repositories` + `services` + `routes` de artículos |
+| **9 bis** | **CRUD de usuarios — hueco del plan original**, ver §10 | `api/routes/user_controller.py` (el repo y el service ya existen del paso 6) |
 | 10 | Ventas y cancelaciones (transacciones) | íd. ventas |
 | 11 | Activity log | íd. activity log |
 | 12 | AEMPS + microservicio IA | `cima_service.py`, `ia_service.py`, `routes/cima_controller.py` |
@@ -451,7 +452,11 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 7 | `api/deps.py` — `get_db`, `get_current_user`, `require_role(*roles)` | Hecho y verificado (`/auth/protected` exige token válido, rechaza ausente/manipulado con 401) |
 | 8 | `exceptions/custom.py` + `exceptions/handlers.py`, registrados en `main.py` | Hecho y verificado (6 excepciones → 404/404/409/409/502/500, y siguen saliendo el 200 de `/` y el 401 de `/auth/protected`) |
 | 9 | Artículos: `articulo_repository.py`, `articulo_service.py`, `articulo_controller.py` + alta en `router.py` | Hecho y verificado (20 comprobaciones: 7 rutas en el OpenAPI, las 7 dan 401 sin token, y 6 casos de excepción→HTTP contra Aiven) |
-| 10–14 | Ventas, activity log completo, AEMPS/IA, usuarios, tests, Docker | Pendiente |
+| 9 bis | CRUD de usuarios — **hueco del plan original**, ningún paso lo reclamaba | Pendiente, analizado en §10 |
+| 10–14 | Ventas, controlador del activity log, AEMPS/IA, tests, Docker | Pendiente, inventario en §10 |
+
+**Inventario de lo que falta, decisiones abiertas y trampas ya pagadas: §10.** Está escrito
+para no repetir el análisis.
 
 ### Paso 9 — lo que se corrigió al revisarlo (2026-09-28)
 
@@ -679,6 +684,110 @@ imagen Docker), y `tests/conftest.py` existe vacío esperando las fixtures.
 routers incluidos, así que para comprobar qué rutas hay registradas se usa
 `app.openapi()["paths"]`. Y `TestClient` re-lanza la excepción no controlada en vez de dejar
 que el handler dé el 500: hace falta `raise_server_exceptions=False`.
+
+---
+
+## 10. Pendientes — inventario y análisis ya hecho
+
+*Cerrado el 2026-09-28. **Esto está escrito para no repetir el mismo análisis tres veces**: si
+algo de aquí se contradice con el código, gana el código, pero el razonamiento no hay que
+volver a hacerlo.*
+
+**Estado en una línea:** 9 de los 25 endpoints vivos (`/auth` ×2 + `/articulos` ×7), 11
+ficheros de código todavía vacíos.
+
+| Paso | Qué falta | Ficheros vacíos |
+|---|---|---|
+| 9 bis | CRUD de usuarios (ver abajo) | `api/routes/user_controller.py` |
+| 10 | Ventas y cancelaciones | `venta_repository.py`, `venta_service.py`, `venta_controller.py`, `venta_cancelada_repository.py`, `venta_cancelada_service.py`, `venta_cancelada_controller.py` |
+| 11 | Activity log: sólo falta exponerlo | `api/routes/activity_log_controller.py` |
+| 12 | AEMPS + microservicio IA | `cima_service.py`, `ia_service.py`, `cima_controller.py` |
+| 13 | Tests (decisión ya cerrada en §9) | `tests/conftest.py` y el resto de `tests/` |
+| 14 | Docker y despliegue | `Dockerfile`, `docker-compose.yml`, workflow |
+
+Del paso 11 ya están hechos `activity_log_repository.py` y `activity_log_service.py`
+(adelantados en el paso 6 porque el login los necesitaba): falta **sólo el controlador**, un
+único endpoint `GET /activity-log/all` y es el **único de los 25 que no es "autenticado" a
+secas** — pide SUPERADMIN, así que va con `Depends(require_role("SUPERADMIN"))`, que ya existe
+en `deps.py` desde el paso 7 y todavía no se usa en ningún sitio.
+
+### El hueco: `/users` no lo reclama ninguno de los 14 pasos
+
+El paso 6 escribió `user_repository.py` y `user_service.py`, pero **sólo para el login**. Los
+cinco endpoints `/users/**` no tienen dueño en la tabla del §7, y ahí viven las reglas de
+autorización que se aparcaron a propósito en el paso 7. Queda como **paso 9 bis**.
+
+Lo que hay que replicar de `UserController.java`, ya leído y analizado:
+
+| Endpoint | Comportamiento del Java |
+|---|---|
+| `GET /users/all` | lista; si está vacía → **204** |
+| `GET /users/{username}` | no encontrado → **404** |
+| `POST /users/insert` | duplicado → **409**; éxito → **201 CREATED**; log `INSERT_USER` |
+| `PUT /users/update` | objetivo inexistente → **404** |
+| `DELETE /users/{id}` | objetivo inexistente → **404**; éxito → **204**; log `DELETE_USER`. **Borrado lógico**, ver la nota del §5 |
+
+**Las tres reglas finas, y por qué no son un `require_role`:** dependen del rol del usuario
+**objetivo**, no del que llama, así que no se pueden expresar como una dependencia de ruta.
+Son lógica de servicio/controlador:
+
+1. `POST /users/insert` — un `ADMIN` sólo puede crear `SELLER`.
+2. `PUT /users/update` — un `ADMIN` no puede modificar a un `ADMIN` ni a un `SUPERADMIN`.
+3. `DELETE /users/{id}` — un `ADMIN` no puede borrar a un `ADMIN` ni a un `SUPERADMIN`.
+
+Las tres devuelven **403** y, antes de devolverlo, **registran un `FORBIDDEN_ACTION`** en el
+activity log con el detalle del intento y la IP. Eso hay que replicarlo: es rastro de
+seguridad, no un adorno.
+
+El `obtenerRolDelCaller()` del Java saca el rol del primer *authority* del
+`SecurityContextHolder` y le quita el prefijo `ROLE_`. **En Python no hace falta nada de eso**:
+`get_current_user` ya devuelve la entidad y `current_user.permiso` trae el valor crudo
+(`"ADMIN"`, no `"ROLE_ADMIN"`) — ver §6 bis.
+
+**Trampa de orden de rutas, en FastAPI sí importa:** `GET /users/all` y
+`GET /users/{username}` son el mismo método sobre el mismo prefijo. FastAPI resuelve **por
+orden de declaración**, así que si `/{username}` se declara primero, se come `all` como si
+fuera un nombre de usuario y `/users/all` nunca se ejecuta. Spring elegía la ruta literal por
+ser más específica y esto no pasaba. **`/users/all` va declarado antes.** (En `/articulos` no
+llegó a pasar: `/All` y `/{id}` no colisionan porque son métodos distintos.)
+
+### Decisiones abiertas — ninguna es un descuido
+
+1. **`DELETE /articulos/{id}` borra el historial de ventas.** `fk_articulos_ventas`
+   (`ventas.codigo` → `articulos.codigo`) es `ON DELETE CASCADE`. Mismo caso que `users` en el
+   paso 6, pero `articulos` no tiene columna `enabled` y añadirla es un cambio manual de
+   esquema (`ddl-auto=none`) en la BD que comparte con el Java en producción. **Decidido el
+   2026-09-28: se deja como el Java**, avisado con un comentario en el endpoint.
+2. **`JWT_SECRET` tiene 13 bytes** y PyJWT avisa en cada firma (para HS256 el mínimo
+   recomendado son 32). No se toca porque es **el mismo secreto que el backend Java en
+   producción**: rotarlo obliga a cambiarlo a la vez en los dos, en los *secrets* de GitHub y
+   en el VPS. **No silenciar el aviso.**
+3. **El paso 14 tiene un problema nuevo desde que el repo es privado** (2026-09-20): el
+   `git clone` anónimo que hacen los workflows de los otros proyectos **fallará**. Hará falta
+   deploy key, PAT, o construir la imagen en CI y desplegar sólo la imagen, como hace
+   `llm-gateway-resilience` con `ghcr.io`.
+4. **El `CMD` del Dockerfile necesita el bucle de eventos correcto** (`--loop
+   asyncio:SelectorEventLoop` o `python -m app.main`), o la conexión TLS a Aiven morirá con un
+   `WinError 87` / `OperationalError (2003)` sin explicar por qué. Ver el comentario largo de
+   `main.py`.
+
+### Trampas ya pagadas — no volver a tropezar
+
+- **`app.routes` no aplana los routers incluidos** en FastAPI 0.141.1 (sale un único
+  `_IncludedRouter`). Para comprobar qué rutas hay: `app.openapi()["paths"]`.
+- **`TestClient(app)` re-lanza la excepción no controlada** en vez de dejar que el handler
+  genérico dé el 500. Hace falta `raise_server_exceptions=False`.
+- **Una sola definición por dependencia.** `deps.py` importa de `core/`, nunca reimplementa:
+  FastAPI cachea por identidad de función y dos `get_db` iguales-pero-distintos duplican las
+  conexiones del pool (ver §8).
+- **`ilike` no sirve de nada en MySQL** y quita el índice: la insensibilidad a mayúsculas la da
+  la collation `utf8mb4_..._ci` de la columna.
+- **Antes de dar por bueno un fichero, importarlo.** El bug recurrente del proyecto (tres
+  veces ya) es llamar a una API plausible que nadie ha escrito: `from jose import`,
+  `create_access_token(data=...)`, `app.api.dependencies.auth_deps`. Un
+  `python -c "import app.x.y"` lo caza en un segundo y leyendo no se ve.
+- **Cuidado al pegar tracebacks de pydantic**: los `ValidationError` incluyen el *valor* de
+  entrada, y uno de ellos ya imprimió la contraseña de Aiven en claro.
 
 ---
 
