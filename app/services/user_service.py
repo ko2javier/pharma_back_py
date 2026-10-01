@@ -9,6 +9,12 @@ from app.repositories.user_repository import UserRepository
 
 from app.core.security import verify_password, get_password_hash
 
+# Las excepciones del paso 8. Este service se escribió en el paso 6, antes de que
+# existieran, así que lanzaba ValueError: handlers.py no lo conoce y caía en el
+# handler genérico -> 500. articulo_service.py ya se migró en el paso 8; esto es
+# el mismo cambio en usuarios.
+from app.exceptions.custom import ResourceNotFoundException, DuplicateResourceException
+
 
 class UserService:
 
@@ -44,14 +50,26 @@ class UserService:
         #     await session.commit()
         user = await UserRepository.find_by_id(session, user_id)
         if not user:
-            # En FastAPI, las excepciones personalizadas luego se capturan para devolver 404
-            raise ValueError(f"Usuario no encontrado con id: {user_id}")
+            # OBSOLETO (el "luego" del comentario ya ha llegado: paso 8):
+            #     # En FastAPI, las excepciones personalizadas luego se capturan para devolver 404
+            #     raise ValueError(f"Usuario no encontrado con id: {user_id}")
+            raise ResourceNotFoundException(f"Usuario no encontrado con id: {user_id}")
 
         user.enabled = False
         await session.commit()
 
     @staticmethod
     async def crear_usuario(session: AsyncSession, username: str, raw_password: str, permiso: str) -> Users:
+        # NUEVO (paso 9 bis). Faltaba el chequeo de duplicado y sin él un username
+        # repetido llegaba al INSERT y moría con el error de clave única de MySQL
+        # -> 500. El Java lo comprueba a mano en UserController.insertarUsuario y
+        # devuelve 409; aquí lo hace DuplicateResourceException vía handlers.py.
+        #
+        # Va ANTES de hashear a propósito: bcrypt cuesta ~50 ms (rounds=10) y no
+        # tiene sentido gastarlos para tirar el resultado.
+        if await UserRepository.find_by_username(session, username):
+            raise DuplicateResourceException(f"El usuario ya existe: {username}")
+
         # 1. Encriptar contraseña de forma asíncrona (reemplaza a passwordEncoder)
         hashed_password = await get_password_hash(raw_password)
 
@@ -79,7 +97,8 @@ class UserService:
         # 1. Buscar usuario existente
         usuario_existente = await UserRepository.find_by_id(session, user_id)
         if not usuario_existente:
-            raise ValueError(f"Usuario no encontrado con ID: {user_id}")
+            # OBSOLETO: raise ValueError(f"Usuario no encontrado con ID: {user_id}")
+            raise ResourceNotFoundException(f"Usuario no encontrado con ID: {user_id}")
 
         # 2. Aplicar el cambio de permiso
         usuario_existente.permiso = permiso

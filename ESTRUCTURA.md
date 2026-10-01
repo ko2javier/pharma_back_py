@@ -259,9 +259,9 @@ y `exceptions/` (`custom.py`, `handlers.py`).
 | GET | `/auth/protected` | autenticado | `AuthController` |
 | GET | `/users/all` | autenticado | `UserController` |
 | GET | `/users/{username}` | autenticado | `UserController` |
-| POST | `/users/insert` | ADMIN solo puede crear SELLER | `UserController` |
-| PUT | `/users/update` | ADMIN no puede tocar ADMIN/SUPERADMIN | `UserController` |
-| DELETE | `/users/{id}` | ADMIN no puede borrar ADMIN/SUPERADMIN | `UserController` — **borrado lógico, ver nota** |
+| POST | `/users/insert` | ADMIN solo puede crear SELLER; un SELLER no entra — **ver nota** | `UserController` |
+| PUT | `/users/update` | ADMIN no puede tocar ADMIN/SUPERADMIN; un SELLER no entra | `UserController` |
+| DELETE | `/users/{id}` | ADMIN no puede borrar ADMIN/SUPERADMIN; un SELLER no entra | `UserController` — **borrado lógico, ver nota** |
 | GET | `/articulos/All` | autenticado | `ArticuloController` |
 | GET | `/articulos/search/{keyword}` | autenticado | `ArticuloController` |
 | POST | `/articulos/insert` | autenticado | `ArticuloController` |
@@ -301,6 +301,27 @@ Con eso:
 
 `UserRepository.delete` (el `DELETE` físico) se deja en el repositorio como
 equivalente genérico de `JpaRepository.delete`, pero el `service` ya no lo llama.
+
+### Nota sobre el SELLER en `/users`: endurecido respecto al Java
+
+**Desviación deliberada, decidida el 2026-10-01.** En el Java, un SELLER con un token
+válido puede llamar a `POST /users/insert` y crearse un SUPERADMIN: `UserController` sólo
+comprueba `"ADMIN".equals(rolCaller)`, y en todo el backend hay **un único** control de rol
+(`SecurityConfig:64`, `/activity-log/**` → `hasRole("SUPERADMIN")`; no existe ni un
+`@PreAuthorize`). La restricción del SELLER vive sólo en el Angular:
+`home.component.html:57` esconde "Gestión Usuarios" con `*ngIf="userRole!='SELLER'"`.
+Esconder el botón no protege el endpoint — basta un `curl` con el token de un vendedor.
+
+Aquí los **tres endpoints que escriben** (`/insert`, `/update`, `DELETE /{id}`) devuelven
+**403** a un SELLER y registran antes un `FORBIDDEN_ACTION`, igual que las otras tres
+reglas. Los dos `GET` se quedan como en el Java (autenticado a secas). No rompe al
+frontend, que nunca ofrece esa pantalla a un SELLER. Comprobado ejecutando: antes del
+cambio un SELLER pidiendo crear un SUPERADMIN recibía **409** (el duplicado del service),
+es decir, la regla no lo frenaba; ahora recibe 403 y queda en el log.
+
+Está en `user_controller.py` y no en `require_role("ADMIN", "SUPERADMIN")` —que sería lo
+idiomático— porque el `FORBIDDEN_ACTION` es parte de la regla: `require_role` corta sin
+dejar rastro, y un SELLER tocando `/users` es justo lo que interesa ver en el log.
 
 ### Flujo de `/api/cima/validar` (el más complejo)
 
@@ -452,7 +473,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 7 | `api/deps.py` — `get_db`, `get_current_user`, `require_role(*roles)` | Hecho y verificado (`/auth/protected` exige token válido, rechaza ausente/manipulado con 401) |
 | 8 | `exceptions/custom.py` + `exceptions/handlers.py`, registrados en `main.py` | Hecho y verificado (6 excepciones → 404/404/409/409/502/500, y siguen saliendo el 200 de `/` y el 401 de `/auth/protected`) |
 | 9 | Artículos: `articulo_repository.py`, `articulo_service.py`, `articulo_controller.py` + alta en `router.py` | Hecho y verificado (20 comprobaciones: 7 rutas en el OpenAPI, las 7 dan 401 sin token, y 6 casos de excepción→HTTP contra Aiven) |
-| 9 bis | CRUD de usuarios — **hueco del plan original**, ningún paso lo reclamaba | Pendiente, analizado en §10 |
+| 9 bis | CRUD de usuarios — **hueco del plan original**, ningún paso lo reclamaba | **Hecho y verificado (2026-10-01):** `user_service.py` migrado a las excepciones del paso 8 + chequeo de duplicado, `user_controller.py` con los 5 endpoints y las reglas de rol, alta en `router.py`. 15 comprobaciones: 401 en las 5 rutas sin token, los tres 403 con su `FORBIDDEN_ACTION`, 404/409, y el alta real contra Aiven (201 + fila en `authorities` + hash `$2a$10$`) con borrado físico de limpieza. **Pendiente de probar:** el camino feliz del borrado lógico |
 | 10–14 | Ventas, controlador del activity log, AEMPS/IA, tests, Docker | Pendiente, inventario en §10 |
 
 **Inventario de lo que falta, decisiones abiertas y trampas ya pagadas: §10.** Está escrito
@@ -685,6 +706,15 @@ routers incluidos, así que para comprobar qué rutas hay registradas se usa
 `app.openapi()["paths"]`. Y `TestClient` re-lanza la excepción no controlada en vez de dejar
 que el handler dé el 500: hace falta `raise_server_exceptions=False`.
 
+**El `conftest.py` tiene que cerrar el engine en el *teardown*.** Visto el 2026-10-01 al
+verificar el paso 9 bis: un script que acaba sin `await engine.dispose()` suelta
+`RuntimeError: Event loop is closed` desde el `__del__` de la conexión de `aiomysql` — el
+recolector intenta cerrar el socket TLS cuando `asyncio.run()` ya ha cerrado el bucle. No
+afecta al resultado (sale *después* de que todo haya terminado bien), pero en una batería de
+tests lo escupe cada fichero y entierra la salida de verdad. La fixture del engine va con
+`yield` y `await engine.dispose()` detrás — el equivalente del `@PreDestroy` que Spring
+ejecutaba solo sobre el `DataSource`.
+
 ---
 
 ## 10. Pendientes — inventario y análisis ya hecho
@@ -693,12 +723,12 @@ que el handler dé el 500: hace falta `raise_server_exceptions=False`.
 algo de aquí se contradice con el código, gana el código, pero el razonamiento no hay que
 volver a hacerlo.*
 
-**Estado en una línea:** 9 de los 25 endpoints vivos (`/auth` ×2 + `/articulos` ×7), 11
-ficheros de código todavía vacíos.
+**Estado en una línea:** *(2026-10-01)* **14** de los 25 endpoints vivos (`/auth` ×2 +
+`/articulos` ×7 + `/users` ×5), **10** ficheros de código todavía vacíos.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
-| 9 bis | CRUD de usuarios (ver abajo) | `api/routes/user_controller.py` |
+| ~~9 bis~~ | ~~CRUD de usuarios~~ — **hecho el 2026-10-01** | — |
 | 10 | Ventas y cancelaciones | `venta_repository.py`, `venta_service.py`, `venta_controller.py`, `venta_cancelada_repository.py`, `venta_cancelada_service.py`, `venta_cancelada_controller.py` |
 | 11 | Activity log: sólo falta exponerlo | `api/routes/activity_log_controller.py` |
 | 12 | AEMPS + microservicio IA | `cima_service.py`, `ia_service.py`, `cima_controller.py` |
@@ -716,6 +746,15 @@ en `deps.py` desde el paso 7 y todavía no se usa en ningún sitio.
 El paso 6 escribió `user_repository.py` y `user_service.py`, pero **sólo para el login**. Los
 cinco endpoints `/users/**` no tienen dueño en la tabla del §7, y ahí viven las reglas de
 autorización que se aparcaron a propósito en el paso 7. Queda como **paso 9 bis**.
+
+**Y no era sólo el controlador** (esta sección lo daba por hecho; corregido el 2026-10-01 al
+empezar el paso): `user_service.py` se escribió en el paso 6, *antes* de que existieran las
+excepciones del paso 8, así que seguía lanzando `ValueError` en `actualizar_usuario` y en
+`delete_user_by_id` — y `ValueError` no tiene handler, caía en el genérico y habría dado **500
+donde toca 404**. Además `crear_usuario` no comprobaba el duplicado, de modo que un `username`
+repetido llegaba al `INSERT` y moría con el error de clave única de MySQL, otro 500 donde el
+Java devuelve 409. Las dos cosas arregladas y probadas contra Aiven; el chequeo del duplicado
+va **antes** de hashear, que bcrypt cuesta ~50 ms.
 
 Lo que hay que replicar de `UserController.java`, ya leído y analizado:
 
@@ -751,6 +790,33 @@ fuera un nombre de usuario y `/users/all` nunca se ejecuta. Spring elegía la ru
 ser más específica y esto no pasaba. **`/users/all` va declarado antes.** (En `/articulos` no
 llegó a pasar: `/All` y `/{id}` no colisionan porque son métodos distintos.)
 
+**Cerrado el 2026-10-01.** Lo escribió Jabier y lo revisé yo. Los cuatro fallos que tenía, por
+si vuelven a aparecer en los pasos 10-12, que son el mismo patrón:
+
+1. **El import inventado otra vez** (cuarta vez en el proyecto, y la misma ruta que en el paso
+   9): `app.api.dependencies.auth_deps.get_current_token_payload`. No existe el paquete ni la
+   función.
+2. **Y debajo, el fallo de verdad:** leía el rol con `token_payload.get("rol", "")` cuando el
+   claim se llama **`role`** (§6 bis). Eso devuelve `""` para todo el mundo, así que las tres
+   reglas finas **no se disparaban nunca**: ni el 403 ni el `FORBIDDEN_ACTION`. Un endpoint roto
+   se nota; una regla de seguridad que nunca salta, no. Arreglado usando `get_current_user` y
+   `current_user.permiso`, que además es más estricto que el Java: el `SecurityContextHolder`
+   saca el rol del token, así que a quien le bajen el rol sigue siendo ADMIN hasta que caduque.
+3. **`router.py` incluía el módulo, no el router** (`include_router(user_controller)`):
+   `AttributeError: module ... has no attribute '_contains_router'` al arrancar.
+4. **Faltaba `dependencies=[Depends(get_current_user)]` en el `APIRouter`** — el mismo agujero
+   del paso 9. Medido sin cabecera `Authorization`: `GET /users/all` → **200 con los 9 usuarios**
+   y `GET /users/{username}` → 200; los otros tres ya pedían token porque reciben al llamante
+   como parámetro.
+
+Y una limpieza: el chequeo de duplicado estaba **dos veces** (en el controlador, fiel al Java, y
+en `UserService.crear_usuario` desde ese mismo día). Se quedó el del service, que es el que no
+se puede saltar; eran dos `SELECT` por alta para la misma pregunta.
+
+**Lo que falta de 9 bis:** probar el camino feliz del borrado lógico (que `DELETE` deja
+`enabled=False` y las ventas intactas). Se aparcó a propósito el 2026-10-01: para probarlo hay
+que crear un usuario, darle una venta y dejar la fila deshabilitada en Aiven.
+
 ### Decisiones abiertas — ninguna es un descuido
 
 1. **`DELETE /articulos/{id}` borra el historial de ventas.** `fk_articulos_ventas`
@@ -758,15 +824,18 @@ llegó a pasar: `/All` y `/{id}` no colisionan porque son métodos distintos.)
    paso 6, pero `articulos` no tiene columna `enabled` y añadirla es un cambio manual de
    esquema (`ddl-auto=none`) en la BD que comparte con el Java en producción. **Decidido el
    2026-09-28: se deja como el Java**, avisado con un comentario en el endpoint.
-2. **`JWT_SECRET` tiene 13 bytes** y PyJWT avisa en cada firma (para HS256 el mínimo
+2. **El SELLER en `/users`: cerrado el 2026-10-01, ya no es una decisión abierta.** Se endurece
+   respecto al Java — un SELLER recibe 403 en los tres endpoints que escriben. El razonamiento
+   y las pruebas, en la nota del §5.
+3. **`JWT_SECRET` tiene 13 bytes** y PyJWT avisa en cada firma (para HS256 el mínimo
    recomendado son 32). No se toca porque es **el mismo secreto que el backend Java en
    producción**: rotarlo obliga a cambiarlo a la vez en los dos, en los *secrets* de GitHub y
    en el VPS. **No silenciar el aviso.**
-3. **El paso 14 tiene un problema nuevo desde que el repo es privado** (2026-09-20): el
+4. **El paso 14 tiene un problema nuevo desde que el repo es privado** (2026-09-20): el
    `git clone` anónimo que hacen los workflows de los otros proyectos **fallará**. Hará falta
    deploy key, PAT, o construir la imagen en CI y desplegar sólo la imagen, como hace
    `llm-gateway-resilience` con `ghcr.io`.
-4. **El `CMD` del Dockerfile necesita el bucle de eventos correcto** (`--loop
+5. **El `CMD` del Dockerfile necesita el bucle de eventos correcto** (`--loop
    asyncio:SelectorEventLoop` o `python -m app.main`), o la conexión TLS a Aiven morirá con un
    `WinError 87` / `OperationalError (2003)` sin explicar por qué. Ver el comentario largo de
    `main.py`.
