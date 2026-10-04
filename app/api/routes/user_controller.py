@@ -50,11 +50,21 @@ from app.exceptions.custom import ResourceNotFoundException
 #     GET /users/all        -> 200  [devolvió 9 usuarios SIN token]
 #     GET /users/testuser   -> 200
 #     POST /insert, PUT /update, DELETE /{id} -> 401
-router = APIRouter(
-    prefix="/users",
-    tags=["Users"],
-    dependencies=[Depends(get_current_user)],
-)
+#
+# VERSIÓN INTERMEDIA (correcta, pero movida el 2026-10-04):
+#     router = APIRouter(
+#         prefix="/users",
+#         tags=["Users"],
+#         dependencies=[Depends(get_current_user)],
+#     )
+#
+# El gate sigue existiendo, pero ahora vive en el include_router() de
+# router.py, junto al del resto de prefijos, como en SecurityConfig.java. Lo
+# que NO se puede mover allí son las reglas finas de abajo (ADMIN sólo crea
+# SELLER, ADMIN no toca a ADMIN/SUPERADMIN, SELLER no escribe): dependen del
+# rol del usuario OBJETIVO, no del que llama, y además registran un
+# FORBIDDEN_ACTION antes del 403, así que son lógica de este controlador.
+router = APIRouter(prefix="/users", tags=["Users"])
 
 
 # ENDURECIMIENTO DELIBERADO respecto al Java (2026-10-01).

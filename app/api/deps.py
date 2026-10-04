@@ -37,33 +37,6 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 # -------------------------------------------------------------------
 # 1. DEPENDENCIA DE BASE DE DATOS (El EntityManager)
 # -------------------------------------------------------------------
-#
-# OBSOLETO — este fichero definía su PROPIO get_db, copia del de
-# core/database.py (paso 2):
-#
-#     async def get_db() -> AsyncGenerator[AsyncSession, None]:
-#         """Genera una sesión de base de datos por cada petición HTTP"""
-#         async with AsyncSessionLocal() as session:
-#             try:
-#                 yield session
-#             finally:
-#                 await session.close()
-#
-# Parecía inofensivo (el código es casi el mismo, y de hecho aquí quedó la
-# versión con el try/finally redundante que ya se había corregido allí), pero
-# FastAPI cachea las dependencias por IDENTIDAD de la función, no por nombre ni
-# por lo que hagan. Dos funciones distintas = dos dependencias distintas = DOS
-# sesiones y DOS conexiones del pool en la misma petición: una para el
-# "session: AsyncSession = Depends(get_db)" del endpoint (que importaba el de
-# core.database) y otra para la que usa get_current_user aquí dentro.
-#
-# Medido con un listener "checkout" del pool: GET /articulos/All gastaba 2 de
-# las 3 conexiones (pool_size=3, max_overflow=0, fijado por la cuota de Aiven),
-# así que cabía UNA sola petición autenticada simultánea en vez de tres.
-#
-# Importando el de core/database.py hay un único objeto función, FastAPI lo
-# reconoce como la misma dependencia y la reutiliza. Es la diferencia entre
-# tener un @PersistenceContext y tener dos EntityManager en la misma petición.
 
 
 # -------------------------------------------------------------------
@@ -82,20 +55,6 @@ async def get_current_user(
         detail="No se pudieron validar las credenciales",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
-    # INCORRECTO (lo que había antes):
-    #     payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-    #     username: str = payload.get("sub")
-    #     if username is None:
-    #         raise excepcion_credenciales
-    #     except JWTError:
-    #         raise excepcion_credenciales
-    #
-    # Además de los tres fallos de import de arriba, esto reimplementaba a mano
-    # la validación que ya hace decode_access_token() en core/security.py
-    # (paso 5) — su propio docstring lo dice: "es la mitad que necesita
-    # api/deps.py (paso 7)". Reutilizarla evita tener la lógica del JWT
-    # (algoritmo, claims obligatorios) en dos sitios que se puedan desincronizar.
     try:
         # 1. Decodificar el JWT (Equivalente a tu JwtUtil.validateToken en Java)
         payload = decode_access_token(token)

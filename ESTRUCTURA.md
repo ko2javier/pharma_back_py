@@ -460,7 +460,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 
 ## 8. Estado actual
 
-*Actualizado el 2026-09-27.*
+*Actualizado el 2026-10-04.*
 
 | Paso | Qué | Estado |
 |---|---|---|
@@ -474,7 +474,9 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 8 | `exceptions/custom.py` + `exceptions/handlers.py`, registrados en `main.py` | Hecho y verificado (6 excepciones → 404/404/409/409/502/500, y siguen saliendo el 200 de `/` y el 401 de `/auth/protected`) |
 | 9 | Artículos: `articulo_repository.py`, `articulo_service.py`, `articulo_controller.py` + alta en `router.py` | Hecho y verificado (20 comprobaciones: 7 rutas en el OpenAPI, las 7 dan 401 sin token, y 6 casos de excepción→HTTP contra Aiven) |
 | 9 bis | CRUD de usuarios — **hueco del plan original**, ningún paso lo reclamaba | **Hecho y verificado (2026-10-01):** `user_service.py` migrado a las excepciones del paso 8 + chequeo de duplicado, `user_controller.py` con los 5 endpoints y las reglas de rol, alta en `router.py`. 15 comprobaciones: 401 en las 5 rutas sin token, los tres 403 con su `FORBIDDEN_ACTION`, 404/409, y el alta real contra Aiven (201 + fila en `authorities` + hash `$2a$10$`) con borrado físico de limpieza. **Pendiente de probar:** el camino feliz del borrado lógico |
-| 10–14 | Ventas, controlador del activity log, AEMPS/IA, tests, Docker | Pendiente, inventario en §10 |
+| 10 | Ventas y cancelaciones | Pendiente, inventario en §10 |
+| 11 | Activity log: `activity_log_controller.py` + alta en `router.py` con `require_role("SUPERADMIN")` | **Hecho y verificado (2026-10-04):** ruta en el OpenAPI con candado, 401 sin token, 403 con ADMIN y con SELLER, 200 con SUPERADMIN, `ipAddress` en camelCase, orden fecha/hora DESC, y `200 []` (no 204) con la lista vacía. Primer uso real de `require_role` |
+| 12–14 | AEMPS/IA, tests, Docker | Pendiente, inventario en §10 |
 
 **Inventario de lo que falta, decisiones abiertas y trampas ya pagadas: §10.** Está escrito
 para no repetir el análisis.
@@ -583,6 +585,71 @@ python -c "from app.core.config import get_settings; s=get_settings(); print(s.d
 ```
 
 ---
+
+### El gate de acceso, consolidado en `router.py` (2026-10-04)
+
+Hasta ahora cada controlador llevaba su propio `dependencies=[Depends(get_current_user)]` en
+el `APIRouter`. Funcionaba, pero **las reglas de acceso estaban repartidas por los ficheros**,
+y eso es justo lo que permitió el mismo agujero dos pasos seguidos: 5 de 7 endpoints de
+`/articulos` abiertos sin token (paso 9) y `GET /users/all` devolviendo 9 usuarios sin token
+(paso 9 bis). Pregunta de Jabier que lo disparó: *"usas una cosa en uno y en otro no, ¿qué
+lógica es esa?"* — tenía razón en el fondo, aunque el reparto no era aleatorio.
+
+Ahora `router.py` es el **equivalente del `SecurityConfig.java`**: la tabla completa de qué
+exige cada prefijo, leída de arriba abajo. Los controladores no dicen nada de autenticación.
+
+| `SecurityConfig.java` | `router.py` |
+|---|---|
+| `.requestMatchers("/auth/**").permitAll()` | `include_router(auth_router)` — sin `dependencies` |
+| `.anyRequest().authenticated()` | `dependencies=[Depends(get_current_user)]` |
+| `.requestMatchers("/activity-log/**").hasRole("SUPERADMIN")` | `dependencies=[Depends(require_role("SUPERADMIN"))]` |
+
+**La asimetría que hay que tener siempre presente**, y que explica los dos agujeros de arriba:
+
+> En Spring, `.anyRequest().authenticated()` es un **cajón de sastre**: un `@RestController`
+> nuevo nace protegido aunque te olvides de él.
+> En FastAPI **no hay cajón de sastre**: un `include_router()` sin `dependencies` nace
+> **ABIERTO**.
+
+Por eso la lista de `router.py` es la checklist obligatoria al cerrar cada paso: si una línea
+nueva no lleva `dependencies`, ese prefijo está público y nada avisa.
+
+Tres detalles comprobados al hacer el traslado:
+
+- **El candado de Swagger sobrevive.** Era el riesgo real de mover la dependencia al
+  `include_router`: el `openapi()` sigue declarando `security` en las 14 operaciones
+  protegidas, así que el botón *Authorize* de `/docs` funciona igual.
+- **`require_role` ya depende de `get_current_user` por dentro**, así que la línea del
+  activity log cubre también la autenticación: no hay que declarar las dos.
+- **`hasRole("SUPERADMIN")` de Spring compara contra la authority `ROLE_SUPERADMIN`** (el
+  prefijo lo añade Spring solo). `require_role` compara contra `Users.permiso` crudo de la BD,
+  así que aquí se escribe **sin** prefijo. Con `"ROLE_SUPERADMIN"` no entraría nadie, y sin
+  ruido: un 403 permanente. Es el mismo error del claim `role`/`rol` del paso 6 y del 9 bis.
+
+Los controladores conservan su import de `get_current_user` **porque no es huérfano**: los
+endpoints que necesitan saber *quién* llama lo siguen pidiendo como parámetro
+(`articulo_controller.py` ×2, `user_controller.py` ×3), que es el equivalente del
+`SecurityContextHolder`. Y no hay doble consulta a la BD: FastAPI cachea cada dependencia
+dentro de la misma petición.
+
+### Paso 11 — el detalle que no se podía copiar de `/articulos`
+
+`GET /activity-log/all` **no lleva el `204 NO_CONTENT`** que sí tiene `GET /articulos/All`. No
+es un descuido: los dos controladores del Java no hacen lo mismo, comprobado en el original
+antes de escribirlo.
+
+| Java | Comportamiento con lista vacía |
+|---|---|
+| `ArticuloController.java:44-50` | `if (articulos.isEmpty()) return noContent()` → **204** |
+| `ActivityLogController.java:19` | devuelve la `List<ActivityLog>` pelada → **200 `[]`** |
+
+Importa replicarlo porque un 204 no trae cuerpo, y un frontend que pintara la tabla del
+historial se encontraría un `undefined` donde espera un array.
+
+Tampoco hay `POST` ni `DELETE`, y es a propósito: el historial no se escribe nunca desde HTTP
+—lo escribe el backend llamando a `ActivityLogService.log()`, por eso
+`activity_log_schema.py` sólo tiene schema de salida— y sin endpoint de borrado el rastro de
+auditoría no se puede limpiar.
 
 ## 8 bis. Los errores (paso 8) — lo que el Java hacía de verdad
 
@@ -723,23 +790,24 @@ ejecutaba solo sobre el `DataSource`.
 algo de aquí se contradice con el código, gana el código, pero el razonamiento no hay que
 volver a hacerlo.*
 
-**Estado en una línea:** *(2026-10-01)* **14** de los 25 endpoints vivos (`/auth` ×2 +
-`/articulos` ×7 + `/users` ×5), **10** ficheros de código todavía vacíos.
+**Estado en una línea:** *(2026-10-04)* **15** de los 25 endpoints vivos (`/auth` ×2 +
+`/articulos` ×7 + `/users` ×5 + `/activity-log` ×1), **9** ficheros de código todavía vacíos.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
 | ~~9 bis~~ | ~~CRUD de usuarios~~ — **hecho el 2026-10-01** | — |
 | 10 | Ventas y cancelaciones | `venta_repository.py`, `venta_service.py`, `venta_controller.py`, `venta_cancelada_repository.py`, `venta_cancelada_service.py`, `venta_cancelada_controller.py` |
-| 11 | Activity log: sólo falta exponerlo | `api/routes/activity_log_controller.py` |
+| ~~11~~ | ~~Activity log: sólo falta exponerlo~~ — **hecho el 2026-10-04** | — |
 | 12 | AEMPS + microservicio IA | `cima_service.py`, `ia_service.py`, `cima_controller.py` |
 | 13 | Tests (decisión ya cerrada en §9) | `tests/conftest.py` y el resto de `tests/` |
 | 14 | Docker y despliegue | `Dockerfile`, `docker-compose.yml`, workflow |
 
-Del paso 11 ya están hechos `activity_log_repository.py` y `activity_log_service.py`
-(adelantados en el paso 6 porque el login los necesitaba): falta **sólo el controlador**, un
-único endpoint `GET /activity-log/all` y es el **único de los 25 que no es "autenticado" a
-secas** — pide SUPERADMIN, así que va con `Depends(require_role("SUPERADMIN"))`, que ya existe
-en `deps.py` desde el paso 7 y todavía no se usa en ningún sitio.
+~~Del paso 11 ya están hechos `activity_log_repository.py` y `activity_log_service.py`
+(adelantados en el paso 6 porque el login los necesitaba): falta **sólo el controlador**.~~
+**Cerrado el 2026-10-04** y aquí sí era sólo el controlador. Era el **único de los 25
+endpoints que no es "autenticado" a secas** y estrenó el `require_role("SUPERADMIN")` que
+estaba en `deps.py` sin usar desde el paso 7. Lo que no era obvio (el `204` que *no* hay que
+copiar de `/articulos`) está en el §8.
 
 ### El hueco: `/users` no lo reclama ninguno de los 14 pasos
 

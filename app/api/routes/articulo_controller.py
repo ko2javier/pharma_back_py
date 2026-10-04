@@ -31,15 +31,23 @@ from app.services.activity_log_service import ActivityLogService
 # JWT; tal como estaba, cualquiera sin token podía vaciar el stock con
 # PUT /updateStock.
 #
-# dependencies= en el router es justo ese equivalente: se aplica a todas las
-# rutas de este fichero. Los dos endpoints que necesitan saber QUIÉN llama lo
-# siguen pidiendo como parámetro, y no hay doble consulta a la BD porque
-# FastAPI cachea cada dependencia dentro de la misma petición.
-router = APIRouter(
-    prefix="/articulos",
-    tags=["Artículos"],
-    dependencies=[Depends(get_current_user)],
-)
+# VERSIÓN INTERMEDIA (correcta, pero movida el 2026-10-04):
+#     router = APIRouter(
+#         prefix="/articulos",
+#         tags=["Artículos"],
+#         dependencies=[Depends(get_current_user)],
+#     )
+#
+# El gate sigue existiendo, pero ahora vive en el include_router() de
+# router.py, para tener TODAS las reglas de acceso en un sitio como en
+# SecurityConfig.java. Funciona igual: las dependencias declaradas en el
+# include_router se suman a las de cada ruta de este fichero.
+#
+# Los endpoints que necesitan saber QUIÉN llama lo siguen pidiendo como
+# parámetro — de ahí que el import de get_current_user siga aquí —, y no hay
+# doble consulta a la BD porque FastAPI cachea cada dependencia dentro de la
+# misma petición.
+router = APIRouter(prefix="/articulos", tags=["Artículos"])
 
 
 @router.get("/search/{keyword}", response_model=list[ArticuloOut])
