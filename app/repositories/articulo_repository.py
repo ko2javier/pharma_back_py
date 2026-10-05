@@ -58,8 +58,12 @@ class ArticuloRepository:
     @staticmethod
     async def save(session: AsyncSession, articulo: Articulos) -> Articulos:
         session.add(articulo)
+        # Quitado el 2026-10-05: await session.refresh(articulo)
+        # Unificado con los repositorios de ventas. flush() ya deja el id y el
+        # version rellenos en el objeto (version lo lleva SQLAlchemy por el
+        # version_id_col, no MySQL), así que el refresh releía lo que ya estaba:
+        #     Articulos.id tras SOLO flush -> 1 / Articulos.version -> 1
         await session.flush()
-        await session.refresh(articulo)
         return articulo
 
     @staticmethod

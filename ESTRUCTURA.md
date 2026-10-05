@@ -460,7 +460,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 
 ## 8. Estado actual
 
-*Actualizado el 2026-10-04.*
+*Actualizado el 2026-10-05.*
 
 | Paso | Qué | Estado |
 |---|---|---|
@@ -474,7 +474,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 8 | `exceptions/custom.py` + `exceptions/handlers.py`, registrados en `main.py` | Hecho y verificado (6 excepciones → 404/404/409/409/502/500, y siguen saliendo el 200 de `/` y el 401 de `/auth/protected`) |
 | 9 | Artículos: `articulo_repository.py`, `articulo_service.py`, `articulo_controller.py` + alta en `router.py` | Hecho y verificado (20 comprobaciones: 7 rutas en el OpenAPI, las 7 dan 401 sin token, y 6 casos de excepción→HTTP contra Aiven) |
 | 9 bis | CRUD de usuarios — **hueco del plan original**, ningún paso lo reclamaba | **Hecho y verificado (2026-10-01):** `user_service.py` migrado a las excepciones del paso 8 + chequeo de duplicado, `user_controller.py` con los 5 endpoints y las reglas de rol, alta en `router.py`. 15 comprobaciones: 401 en las 5 rutas sin token, los tres 403 con su `FORBIDDEN_ACTION`, 404/409, y el alta real contra Aiven (201 + fila en `authorities` + hash `$2a$10$`) con borrado físico de limpieza. **Pendiente de probar:** el camino feliz del borrado lógico |
-| 10 | Ventas y cancelaciones | Pendiente, inventario en §10 |
+| 10 | Ventas y cancelaciones: `venta_repository.py`, `venta_cancelada_repository.py`, `venta_service.py`, `venta_cancelada_service.py`, `venta_controller.py`, `venta_cancelada_controller.py` + dos altas en `router.py` | **Hecho y verificado (2026-10-05):** 49 comprobaciones de nivel 2. Los 7 endpoints dan 401 sin token; `/ventas/all` no se lo come `/{username}`; 204 en los dos GET de ventas y `200 []` en `/cancelaciones`; 200 (no 201) al registrar; 404 (no 500) al cancelar una venta inexistente; 422 sin `?responsable=`; el log guarda el username del token y no el `responsable`; el `id` del cliente se ignora en `POST /cancelaciones` |
 | 11 | Activity log: `activity_log_controller.py` + alta en `router.py` con `require_role("SUPERADMIN")` | **Hecho y verificado (2026-10-04):** ruta en el OpenAPI con candado, 401 sin token, 403 con ADMIN y con SELLER, 200 con SUPERADMIN, `ipAddress` en camelCase, orden fecha/hora DESC, y `200 []` (no 204) con la lista vacía. Primer uso real de `require_role` |
 | 12–14 | AEMPS/IA, tests, Docker | Pendiente, inventario en §10 |
 
@@ -651,6 +651,96 @@ Tampoco hay `POST` ni `DELETE`, y es a propósito: el historial no se escribe nu
 `activity_log_schema.py` sólo tiene schema de salida— y sin endpoint de borrado el rastro de
 auditoría no se puede limpiar.
 
+### Paso 10 — lo que se encontró leyendo el Java (2026-10-05)
+
+Seis cosas del original que cambian lo que hay que escribir, todas comprobadas antes de
+escribir una línea:
+
+1. **Registrar una venta NO descuenta stock.** `VentaService.java` inyecta
+   `articulosRepository` y **no lo usa en ningún sitio**. Quien descuenta es el frontend, en
+   una segunda petición: `carritocomponent.ts:157` llama a `actualizarStockBatch()` →
+   `PUT /articulos/updateStock`. **Son dos peticiones sin transacción común:** si la segunda
+   falla con 409, la venta ya está registrada y el stock sin tocar. Deuda real de producción;
+   se replica tal cual, avisado con un comentario en el endpoint. Si algún día se arregla, el
+   sitio es el service, descontando dentro de la misma transacción.
+2. **Dos de los siete endpoints están muertos.** `POST /ventas/registrar` (singular) y
+   `POST /cancelaciones` no los llama nadie en todo el Angular: el carrito usa sólo
+   `/registrar/list` (`ventas-user.service.ts:47`), y `registrarCancelacion` existe en
+   `ventas-canceladas.service.ts:31` sin que ningún componente la invoque. Se replican por
+   contrato, pero **no hay frontend que los valide**.
+3. **La colisión de rutas, otra vez.** `GET /ventas/all` y `GET /ventas/{username}` son el
+   mismo método sobre el mismo prefijo, igual que en `/users`: `/all` va declarado **antes** o
+   entra por `{username}` con `username="all"` y devuelve 204 sin que nadie se entere.
+4. **El contraste de códigos dentro del mismo paso.** `/ventas` sí lleva 204 con lista vacía
+   (`VentaController.java:34-36, 44-46`), `/cancelaciones` **no** (devuelve la `List` pelada,
+   como el activity-log). Y `POST /ventas/registrar` da **200, no 201**, mientras
+   `/users/insert` sí da 201. Es la lección del paso 11 repetida: el estilo de un endpoint no
+   se copia del de al lado, se lee en su Java.
+5. **`DELETE /ventas/cancelar/{id}` devuelve 200 con cuerpo vacío**, no 204
+   (`ResponseEntity.ok().build()`, `VentaController.java:70`), al contrario que el DELETE de
+   `/articulos`.
+6. **El `responsable` viene por query param, no del token.** Un cliente puede firmar la
+   cancelación con el nombre de otro, y el Java no lo valida. Por eso el `CANCEL_SALE` del
+   activity log guarda **`current_user.username`**, el del token: `responsable` es quien firma
+   en el historial, el log es quien lo pidió de verdad. Si alguien firma con otro nombre, ahí
+   se ve.
+
+Y una trampa de FastAPI que no existe en Spring: **las rutas de `/cancelaciones` son `""`, no
+`"/"`.** El Java es `@GetMapping` sin path sobre `@RequestMapping("/cancelaciones")`, o sea
+exactamente `/cancelaciones`. Con `@router.get("/")` la ruta sería `/cancelaciones/`, otra
+distinta, y el frontend llama sin barra (`ventas-canceladas.service.ts:12`): se comería un
+**307** en cada petición. Comprobado que tal como está, `/cancelaciones` responde 200 directo y
+es `/cancelaciones/` la que redirige hacia ella.
+
+#### Lo que se corrigió al revisar (ficheros 1, 3 y 4, escritos por Jabier)
+
+1. **`VentaCanceladaRepository` acabó dentro de `venta_repository.py`**, con su propia cabecera
+   `# app/repositories/venta_cancelada_repository.py` incluida, mientras el fichero de verdad
+   seguía vacío. **Es el mismo fallo del paso 6** con `activity_log_service.py`: contenido
+   correcto en la pestaña equivocada de PyCharm. Y el import **no lo caza**, porque el
+   `from venta_repository import VentaRepository, VentaCanceladaRepository` del service
+   apuntaba a donde sí estaba. Se vio con `dir()` del módulo que debía tenerlo.
+2. **Y debajo iba lo caro: faltaba `find_all`.** `VentaCanceladaRepository` sólo tenía `save`,
+   así que `GET /cancelaciones` no se podía hacer (`VentaCanceladaService.obtenerTodas()` es un
+   `findAll()` pelado). Por esto no se para en el primer hallazgo.
+3. **`cancelar_venta` lanzaba `ValueError`** con un comentario que decía *"más adelante el
+   controlador atrapará esto"* — eso es volver al `try/except` que el paso 8 quitó. `ValueError`
+   no tiene handler, cae en el genérico y da **500 donde toca 404**. Corregido a
+   `ResourceNotFoundException`. (Era el aviso del §10: *todo lo escrito antes del paso 8 puede
+   seguir con `ValueError`* — aquí era código nuevo, lo que lo hace más fácil de repetir.)
+4. **`registrar_cancelacion` era el único "crear" del proyecto que recibía una entidad de
+   SQLAlchemy** en vez de un schema. No es un agujero por sí mismo, pero con la entidad en la
+   firma el controlador tiene que importar el modelo y montarla, y el único sitio donde se
+   garantiza que no llegue un `id` del cliente pasa a ser ese controlador. Con
+   `VentaCanceladaCreate` en la firma no hay nada que recordar: el schema no tiene campo `id`.
+5. **Lo que estaba bien y se mantuvo:** quitar el `obtenerUsuarioAutenticado()` del service y
+   pasar `username` como parámetro. El Java mete `SecurityContextHolder` dentro del `@Service`,
+   lo que lo ata a Spring Security; así el service no sabe nada de autenticación ni de HTTP,
+   igual que `core/security.py` no importa FastAPI.
+
+#### Se quitó el `session.refresh()` de los cinco `save` (2026-10-05)
+
+Había `refresh` en `articulo`, `user` y `activity_log`, y Jabier lo puso en `venta` pero no en
+`venta_cancelada`. Preguntado qué unificar, decidió quitarlo. **Es un `SELECT` de más:**
+`flush()` manda el INSERT y SQLAlchemy ya escribe de vuelta en el objeto la clave generada.
+Comprobado ejecutando los cinco modelos:
+
+```
+Articulos id=1   Users id=1   ActivityLog id=1   Ventas id=1   VentaCancelada id=1
+Articulos.version tras SOLO flush -> 1        (lo lleva SQLAlchemy por el version_id_col)
+Users.enabled tras SOLO flush     -> True     (default de Python)
+```
+
+**Sigue haciendo falta cuando la columna la rellena el servidor** y Python no puede saberlo (un
+`DEFAULT CURRENT_TIMESTAMP`, un trigger): ahí el objeto se quedaría con `None`. En este
+proyecto no hay ninguna. Y no hay riesgo de que los atributos se vacíen tras el `commit()`
+porque `AsyncSessionLocal` va con `expire_on_commit=False` — con el defecto (`True`) un acceso
+posterior intentaría recargar y en async eso revienta con `MissingGreenlet`.
+
+Detalle relacionado, comprobado al tocar `VentaCancelada`: **SQLAlchemy aplica el `default` de
+la columna incluso si le pasas `fecha=None` explícitamente**, no sólo cuando omites el campo.
+Por eso el service puede pasar `fecha=datos.fecha` sin comprobar si viene vacío.
+
 ## 8 bis. Los errores (paso 8) — lo que el Java hacía de verdad
 
 Leyendo `GlobalExceptionHandler.java` y cruzándolo con el frontend Angular (2026-09-28):
@@ -790,17 +880,23 @@ ejecutaba solo sobre el `DataSource`.
 algo de aquí se contradice con el código, gana el código, pero el razonamiento no hay que
 volver a hacerlo.*
 
-**Estado en una línea:** *(2026-10-04)* **15** de los 25 endpoints vivos (`/auth` ×2 +
-`/articulos` ×7 + `/users` ×5 + `/activity-log` ×1), **9** ficheros de código todavía vacíos.
+**Estado en una línea:** *(2026-10-05)* **22** de los 25 endpoints vivos (`/auth` ×2 +
+`/articulos` ×7 + `/users` ×5 + `/ventas` ×5 + `/cancelaciones` ×2 + `/activity-log` ×1),
+**3** ficheros de código todavía vacíos.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
 | ~~9 bis~~ | ~~CRUD de usuarios~~ — **hecho el 2026-10-01** | — |
-| 10 | Ventas y cancelaciones | `venta_repository.py`, `venta_service.py`, `venta_controller.py`, `venta_cancelada_repository.py`, `venta_cancelada_service.py`, `venta_cancelada_controller.py` |
+| ~~10~~ | ~~Ventas y cancelaciones~~ — **hecho el 2026-10-05** | — |
 | ~~11~~ | ~~Activity log: sólo falta exponerlo~~ — **hecho el 2026-10-04** | — |
 | 12 | AEMPS + microservicio IA | `cima_service.py`, `ia_service.py`, `cima_controller.py` |
 | 13 | Tests (decisión ya cerrada en §9) | `tests/conftest.py` y el resto de `tests/` |
 | 14 | Docker y despliegue | `Dockerfile`, `docker-compose.yml`, workflow |
+
+Del **paso 10** no hay que volver a analizar nada: lo que el Java hace de verdad (que registrar
+una venta no descuenta stock, los dos endpoints muertos, el contraste de 204 entre `/ventas` y
+`/cancelaciones`) está en el §8. **El paso 12 es el único que queda de código de negocio**, y es
+el más complejo de los 25 por el flujo de `/api/cima/validar` (§5).
 
 ~~Del paso 11 ya están hechos `activity_log_repository.py` y `activity_log_service.py`
 (adelantados en el paso 6 porque el login los necesitaba): falta **sólo el controlador**.~~
@@ -919,10 +1015,24 @@ que crear un usuario, darle una venta y dejar la fila deshabilitada en Aiven.
   conexiones del pool (ver §8).
 - **`ilike` no sirve de nada en MySQL** y quita el índice: la insensibilidad a mayúsculas la da
   la collation `utf8mb4_..._ci` de la columna.
-- **Antes de dar por bueno un fichero, importarlo.** El bug recurrente del proyecto (tres
+- **Antes de dar por bueno un fichero, importarlo.** El bug recurrente del proyecto (cuatro
   veces ya) es llamar a una API plausible que nadie ha escrito: `from jose import`,
-  `create_access_token(data=...)`, `app.api.dependencies.auth_deps`. Un
+  `create_access_token(data=...)`, `app.api.dependencies.auth_deps` ×2. Un
   `python -c "import app.x.y"` lo caza en un segundo y leyendo no se ve.
+- **Pero el import que funciona no demuestra nada.** En el paso 10 todo importaba y aun así
+  `VentaCanceladaRepository` estaba en el fichero de ventas (segunda vez que pasa, tras
+  `activity_log_service.py` en el paso 6). La comprobación que sí lo caza es mirar **qué hay en
+  cada módulo**, no si se puede importar:
+  `python -c "import app.x.y as m; print([n for n in dir(m) if not n.startswith('_')])"`.
+  Un módulo vacío devuelve `[]` y una clase de más salta a la vista.
+- **Rutas sin segmento: `""`, nunca `"/"`.** Con `prefix="/cancelaciones"`, `@router.get("")`
+  da `/cancelaciones` y `@router.get("/")` da `/cancelaciones/`, que es otra ruta. La canónica
+  tiene que ser la que llama el frontend, o se come un 307 en cada petición. En Spring,
+  `@GetMapping` sin path sobre `@RequestMapping("/x")` es siempre `/x`.
+- **Orden de declaración en rutas que colisionan.** Van dos prefijos con el mismo caso
+  (`/users/all` vs `/users/{username}`, `/ventas/all` vs `/ventas/{username}`): la literal va
+  **antes**. Y la forma de comprobarlo no es leer el fichero, es registrar a qué función del
+  service llega la petición.
 - **Cuidado al pegar tracebacks de pydantic**: los `ValidationError` incluyen el *valor* de
   entrada, y uno de ellos ya imprimió la contraseña de Aiven en claro.
 

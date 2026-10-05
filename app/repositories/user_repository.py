@@ -36,7 +36,8 @@ class UserRepository:
         # El commit se suele hacer en el Service, pero si replicamos el comportamiento
         # exacto de JpaRepository.save(), lo incluimos aquí.
         await session.flush()
-        await session.refresh(user)
+        # Quitado el 2026-10-05: await session.refresh(user) — un SELECT de más.
+        # El motivo, explicado largo, en venta_repository.save.
         return user
 
     @staticmethod

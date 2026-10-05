@@ -12,8 +12,9 @@ class ActivityLogRepository:
     async def save(session: AsyncSession, log: ActivityLog) -> ActivityLog:
         """Equivalente a guardar un nuevo registro (insert)."""
         session.add(log)
+        # Quitado el 2026-10-05: await session.refresh(log) — un SELECT de más.
+        # El motivo, explicado largo, en venta_repository.save.
         await session.flush()
-        await session.refresh(log)
         return log
 
     @staticmethod

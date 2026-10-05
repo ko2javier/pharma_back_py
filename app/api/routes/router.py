@@ -26,6 +26,8 @@ from fastapi import APIRouter, Depends
 from app.api.routes.auth_controller import router as auth_router
 from app.api.routes.articulo_controller import router as articulo_router
 from app.api.routes.user_controller import router as user_router
+from app.api.routes.venta_controller import router as venta_router
+from app.api.routes.venta_cancelada_controller import router as venta_cancelada_router
 from app.api.routes.activity_log_controller import router as activity_log_router
 from app.api.deps import get_current_user, require_role
 
@@ -54,6 +56,25 @@ api_router.include_router(
 # TU VERSIÓN: api_router.include_router(user_controller)  <- el módulo
 api_router.include_router(
     user_router,
+    dependencies=[Depends(get_current_user)],
+)
+
+# /ventas/** -> AUTENTICADO.
+# Los cinco endpoints, incluido el DELETE /cancelar/{id}. En el Java tampoco hay
+# control de rol aquí: cualquiera con token válido puede cancelar una venta
+# ajena, y el 'responsable' que queda firmando en el historial lo elige el
+# cliente. No se endurece (al contrario que /users): el frontend usa esta
+# pantalla con los tres roles, así que pedir ADMIN rompería al vendedor.
+api_router.include_router(
+    venta_router,
+    dependencies=[Depends(get_current_user)],
+)
+
+# /cancelaciones -> AUTENTICADO.
+# Prefijo aparte porque en el Java son dos @RestController distintos, aunque
+# escriban la misma tabla que /ventas/cancelar.
+api_router.include_router(
+    venta_cancelada_router,
     dependencies=[Depends(get_current_user)],
 )
 
