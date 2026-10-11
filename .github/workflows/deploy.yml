@@ -50,6 +50,43 @@ jobs:
       - name: Descargar el codigo
         uses: actions/checkout@v4
 
+      # ───────── DEPURACION TEMPORAL — borrar cuando el despliegue funcione ─────────
+      # No imprime el token en ningun momento: solo sus campos (sub, aud, iss...),
+      # que son los que el rol compara. El token si se imprimiera valdria como
+      # credencial durante unos minutos.
+      - name: DEPURACION - que dice el carne que emite GitHub
+        run: |
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "GitHub no ha emitido token: falta el permiso id-token: write"
+            exit 1
+          fi
+          echo "$TOKEN" > /tmp/oidc_token
+          PAYLOAD=$(cut -d. -f2 /tmp/oidc_token | tr '_-' '/+')
+          while [ $((${#PAYLOAD} % 4)) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
+          echo "=== lo que presenta GitHub ==="
+          echo "$PAYLOAD" | base64 -d | jq '{iss, aud, sub, repository, repository_owner, ref, workflow_ref}'
+          echo "=== lo que exige el rol ==="
+          echo '  aud = sts.amazonaws.com'
+          echo '  sub = repo:ko2javier/pharma_back_py:ref:refs/heads/master'
+
+      - name: DEPURACION - pedirle el rol a STS a mano, para ver el error de verdad
+        continue-on-error: true
+        run: |
+          # Esta llamada NO necesita credenciales: es justo la que convierte el
+          # carne en credenciales. La hacemos nosotros para que AWS nos conteste
+          # con su mensaje original, que la accion oficial resume como
+          # "Not authorized" y pierde el detalle.
+          aws sts assume-role-with-web-identity \
+            --role-arn arn:aws:iam::<ID-DE-CUENTA-AWS>:role/github-actions-pharma-ecr \
+            --role-session-name prueba-manual \
+            --web-identity-token "$(cat /tmp/oidc_token)" \
+            --region eu-central-1 \
+            --query 'AssumedRoleUser.Arn' --output text
+      # ───────── FIN DE LA DEPURACION TEMPORAL ─────────
+
       - name: Pedir credenciales temporales a AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
