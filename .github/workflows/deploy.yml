@@ -1,0 +1,85 @@
+# Construye la imagen y la sube a ECR (Amazon Elastic Container Registry).
+#
+# Lo que NO hay aqui, y es deliberado: ni una credencial de AWS. Los workflows
+# de los otros proyectos guardan claves en los secrets de GitHub; este no
+# guarda ninguna. Usa OIDC: GitHub firma un carne temporal que dice "soy el
+# repo ko2javier/pharma_back_py en la rama master", AWS lo verifica contra las
+# claves publicas de GitHub y, si coincide con lo autorizado en el rol, le
+# presta ese rol unos minutos. No hay nada que rotar ni que se pueda filtrar.
+#
+# El despliegue en la instancia todavia NO esta aqui: de momento esto solo
+# deja la imagen publicada en ECR. El paso de desplegar se anade cuando la
+# EC2 exista, y ese mismo dia hay que meter este repositorio en la lista
+# REPOS_QUE_DESPLIEGAN del hook guard_push.py.
+
+name: Build and push to ECR
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      # Un cambio de documentacion no cambia la imagen: reconstruirla seria
+      # gastar minutos de Actions y una version nueva en ECR para nada. Esto
+      # es justo el problema que tiene el repo del back de Java, donde un
+      # README reconstruye el contenedor entero.
+      - '**.md'
+      - '.claude/**'
+      - '.idea/**'
+  # Para poder lanzarlo a mano desde la pestana Actions sin tocar el codigo,
+  # que es comodisimo cuando lo que falla es el despliegue y no el commit.
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: pharma-back-py
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    # Sin estos dos permisos el OIDC no funciona, y el error que da
+    # ("Credentials could not be loaded") no explica el motivo:
+    #   id-token: write  -> deja que el job pida el carne firmado a GitHub
+    #   contents: read   -> deja que el checkout lea el codigo
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Pedir credenciales temporales a AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<ID-DE-CUENTA-AWS>:role/github-actions-pharma-ecr
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Entrar en el registro
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construir la imagen y subirla
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Dos etiquetas para la MISMA imagen:
+          #   latest -> la que se baja el servidor, siempre la ultima
+          #   <sha>  -> la del commit exacto, para poder volver atras sabiendo
+          #             que version era. Sin esta, "latest" es un agujero
+          #             negro: no hay forma de saber que codigo esta corriendo.
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          # Cache entre ejecuciones: sin esto, cada push reinstala las 10
+          # dependencias de requirements.txt desde cero (unos 40 s tirados).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Decir que ha quedado publicado
+        run: |
+          echo "Imagen publicada:"
+          echo "  ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+          echo "  ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"

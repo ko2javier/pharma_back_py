@@ -1,0 +1,60 @@
+# docker-compose.yml -- como se LEVANTA la API en el servidor.
+#
+# Diferencia de fondo con el compose del Java (fp_api): ese lleva "build: ." y
+# construye la imagen en el propio servidor. Este NO construye nada: se baja
+# una imagen ya hecha de ECR. Dos motivos, los dos reales:
+#
+#   1. La instancia de AWS es una t3.micro con 1 GB de RAM. Un "pip install"
+#      dentro de un build con tan poca memoria es el candidato numero uno a
+#      morir por OOM, y el fallo aparece a mitad del despliegue, no antes.
+#   2. El repositorio es privado desde el 2026-09-20. Con "build" el servidor
+#      tendria que clonar el codigo, y eso exige meterle una deploy key.
+#      Bajando la imagen, el servidor NO necesita acceso al repositorio: solo
+#      permiso de lectura en ECR, y ese permiso se lo da el ROL de la
+#      instancia, sin una sola credencial escrita en disco.
+
+services:
+  app:
+    # Sin "build". La imagen la construye GitHub Actions y la publica en ECR.
+    # El registro no se escribe a pelo porque lleva dentro el numero de cuenta
+    # de AWS y la region; va en el .env del servidor, como el resto:
+    #     ECR_REGISTRY=<cuenta>.dkr.ecr.<region>.amazonaws.com
+    image: ${ECR_REGISTRY}/pharma-back-py:${IMAGE_TAG:-latest}
+    container_name: fp_api_py
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # ENVIRONMENT=prod no es decorativo. Con "dev", el engine de SQLAlchemy
+      # arranca con echo activado y el log del contenedor acaba guardando CADA
+      # consulta con sus parametros: nombres de usuario, hashes y lo que lleve
+      # el WHERE. El .env de desarrollo trae dev, asi que aqui se pisa.
+      ENVIRONMENT: prod
+
+      # El companero de --proxy-headers del Dockerfile. Sin esta variable,
+      # uvicorn solo se cree la cabecera X-Forwarded-For si viene de 127.0.0.1,
+      # y el activity_log guardaria la IP del proxy en vez de la del navegador.
+      # Medido con X-Forwarded-For: 83.45.12.7 -> sin ella la API ve
+      # 172.17.0.1, con ella ve la IP real. Vive aqui y no en el CMD para poder
+      # cambiarla sin reconstruir la imagen.
+      FORWARDED_ALLOW_IPS: "*"
+    ports:
+      # <host>:<contenedor>. Dentro siempre 8001, que es lo que fija PORT en el
+      # Dockerfile y lo que exige Settings. Fuera, lo que diga HOST_PORT: se
+      # deja en variable porque en Hetzner el 5050 ya es del Java y alli habria
+      # que elegir otro puerto sin tocar este fichero.
+      - "${HOST_PORT:-8001}:8001"
+    networks:
+      - farmacia-ko2-network
+
+networks:
+  # external: true significa "esta red ya existe, no la crees tu". Es la misma
+  # decision que en Hetzner, y el motivo es que el microservicio de IA vive en
+  # OTRO repositorio con su propio compose: si cada uno creara su red, los dos
+  # contenedores estarian en redes distintas y http://fp_gpt:8000 no resolveria
+  # (fallaria /api/cima/validar, y solo en produccion).
+  #
+  # Hay que crearla UNA vez en la instancia, antes del primer "up":
+  #     docker network create farmacia-ko2-network
+  farmacia-ko2-network:
+    external: true
