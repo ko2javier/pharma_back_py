@@ -3,7 +3,8 @@
 # Sólo lo usaba la firma del get_db duplicado que se ha quitado de aquí (y en
 # core/database.py se importa de collections.abc, no de typing: el de typing
 # está deprecado desde Python 3.9).
-from fastapi import Depends, HTTPException, status
+import httpx
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 import jwt  # PyJWT, no python-jose
@@ -71,6 +72,29 @@ async def get_current_user(
     if user is None:
         raise excepcion_credenciales
 
+    # AÑADIDO EN EL PASO 12 — suelta la conexión del pool antes de seguir.
+    #
+    # Sin esta línea, el SELECT de arriba deja una de las 3 conexiones de Aiven
+    # (pool_size=3, max_overflow=0) retenida hasta que TERMINA la petición, no
+    # hasta que acaba la consulta. Da igual en un endpoint que sólo toca la BD,
+    # pero /api/cima/** habla con AEMPS (hasta 10 s) y con la IA (hasta 30):
+    # tres búsquedas lentas a la vez dejaban sin conexiones al resto de la API,
+    # y la cuarta petición esperaba el pool_timeout (30 s) para morir con 500.
+    #
+    # El Java no tenía este problema aquí: autentica con JdbcUserDetailsManager,
+    # que devuelve la conexión al momento (misma cuota, hikari.maximum-pool-size=3).
+    #
+    # INCORRECTO (lo que propuso el revisor): await session.rollback()
+    # También suelta la conexión, pero CADUCA los atributos de 'user' (medido:
+    # expired_attributes = ['id', 'name'] tras rollback, [] tras commit, aunque
+    # AsyncSessionLocal vaya con expire_on_commit=False). Luego, el primer
+    # current_user.username del endpoint intentaría recargar la fila y en async
+    # eso revienta con MissingGreenlet.
+    #
+    # Aquí commit() no "guarda" nada: no hay nada pendiente, esta dependencia
+    # corre antes del cuerpo del endpoint. Sólo cierra la transacción de lectura.
+    await session.commit()
+
     # 3. Validar reglas de negocio (ej. si fue baneado después de emitir el token)
     if not getattr(user, 'enabled', True):
         raise HTTPException(
@@ -108,3 +132,16 @@ def require_role(*roles: str):
         return current_user
 
     return role_checker
+
+
+# -------------------------------------------------------------------
+# 4. DEPENDENCIA DEL CLIENTE HTTP (el @Autowired RestTemplate)
+# -------------------------------------------------------------------
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    """Devuelve el httpx.AsyncClient único que crea el lifespan de main.py.
+
+    No crea nada: sólo lo saca de app.state. Así cima_service.py e
+    ia_service.py lo reciben como parámetro (igual que la AsyncSession) y en
+    los tests se sustituye con dependency_overrides sin tocar los services.
+    """
+    return request.app.state.http_client

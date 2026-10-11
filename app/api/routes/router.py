@@ -29,6 +29,7 @@ from app.api.routes.user_controller import router as user_router
 from app.api.routes.venta_controller import router as venta_router
 from app.api.routes.venta_cancelada_controller import router as venta_cancelada_router
 from app.api.routes.activity_log_controller import router as activity_log_router
+from app.api.routes.cima_controller import router as cima_router
 from app.api.deps import get_current_user, require_role
 
 api_router = APIRouter()
@@ -96,4 +97,14 @@ api_router.include_router(
 api_router.include_router(
     activity_log_router,
     dependencies=[Depends(require_role("SUPERADMIN"))],
+)
+
+# /api/cima/** -> AUTENTICADO (paso 12).
+# Los tres endpoints de AEMPS + IA. En el Java es .anyRequest().authenticated():
+# ningún rol concreto, los tres roles validan medicamentos desde el almacén.
+# Sin esta línea serían un proxy ABIERTO a AEMPS y, peor, a la IA (que cuesta
+# dinero por llamada).
+api_router.include_router(
+    cima_router,
+    dependencies=[Depends(get_current_user)],
 )

@@ -44,18 +44,13 @@ class InsufficientStockException(Exception):
     """
 
 
-class AempsNotFoundException(Exception):
-    """AEMPS no tiene resultados para la búsqueda.
-
-    Distinta de ResourceNotFoundException aunque comparta el 404: aquí no es
-    que falte algo en nuestra base de datos, es que el catálogo oficial no
-    tiene ese medicamento. almacen.component.ts:309 la distingue del 409 de
-    arriba con un mensaje distinto ("No encontrado en AEMPS").
-    """
-
-
 class ExternalServiceException(Exception):
-    """Fallo hablando con un servicio externo (AEMPS o el microservicio IA).
+    """Fallo hablando con AEMPS → 502.
+
+    INCORRECTO (lo que decía antes): "AEMPS o el microservicio IA". La IA NO
+    pasa por aquí: en el Java su llamada no tiene try (CimaController.java:105)
+    y un fallo suyo acaba en el handler genérico → 500. Se replica así; ver
+    ia_service.py.
 
     Es la única de las cuatro que también existe y se lanza de verdad en el
     Java (CimaController, catch de RestTemplate) — se replica el nombre tal

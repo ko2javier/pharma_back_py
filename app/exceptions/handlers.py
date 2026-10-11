@@ -17,7 +17,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.exceptions.custom import (
-    AempsNotFoundException,
     DuplicateResourceException,
     ExternalServiceException,
     InsufficientStockException,
@@ -29,12 +28,6 @@ logger = logging.getLogger(__name__)
 
 async def resource_not_found_handler(
     request: Request, exc: ResourceNotFoundException
-) -> JSONResponse:
-    return JSONResponse(status_code=404, content={"error": str(exc)})
-
-
-async def aemps_not_found_handler(
-    request: Request, exc: AempsNotFoundException
 ) -> JSONResponse:
     return JSONResponse(status_code=404, content={"error": str(exc)})
 
@@ -79,7 +72,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ResourceNotFoundException, resource_not_found_handler)
-    app.add_exception_handler(AempsNotFoundException, aemps_not_found_handler)
     app.add_exception_handler(DuplicateResourceException, duplicate_resource_handler)
     app.add_exception_handler(InsufficientStockException, insufficient_stock_handler)
     app.add_exception_handler(StaleDataError, stale_data_handler)

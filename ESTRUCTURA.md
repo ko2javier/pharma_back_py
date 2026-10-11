@@ -325,13 +325,49 @@ dejar rastro, y un SELLER tocando `/users` es justo lo que interesa ver en el lo
 
 ### Flujo de `/api/cima/validar` (el más complejo)
 
-1. Si el producto ya existe en inventario → `409 Conflict`.
-2. Consulta a AEMPS (`https://cima.aemps.es/cima/rest/medicamentos`), hasta 100 resultados.
-3. Convierte los resultados crudos a `MedicamentoAempsDTO` (`nregistro` + `nombre`).
-4. Si no hay resultados → `404 Not Found`.
+1. Si el producto ya existe en inventario → `409 Conflict`, cuerpo `{"mensaje": ...}`.
+2. Consulta a AEMPS (`https://cima.aemps.es/cima/rest/medicamentos`) con `tamanioPagina=100`.
+3. Convierte los resultados crudos a `MedicamentoAempsDTO` (`nregistro` → `id`, `nombre`).
+4. Si no hay resultados → `404 Not Found`, cuerpo `{"mensaje": ...}`.
 5. Envía la lista al microservicio de IA (`POST {IA_SERVICE_URL}/api/v1/ia/match`, cabecera `x-api-key`).
 6. Registra la búsqueda en `activity_log` con la acción `IA_MATCH` y la IP.
-7. Devuelve el resultado de la IA.
+7. Devuelve el resultado de la IA tal cual, sin envolver.
+
+**El 409 y el 404 llevan la clave `mensaje`, no `error`:** en el Java son `ResponseEntity`
+escritos a mano y no pasan por el `GlobalExceptionHandler`. Por eso en Python son
+`JSONResponse` a mano y **se borró `AempsNotFoundException`** (ver §8 bis).
+
+**Si falla la IA, son 500 y no 502.** Es lo más importante de este flujo y lo contrario de lo
+que decía este documento: no hay ningún `try` alrededor de la llamada a la IA
+(`CimaController.java:105`, ni dentro de `IaService.java`), así que una caída, un timeout, una
+api-key mala o un 5xx del micro suben sin capturar hasta el handler genérico. El 502 es sólo de
+AEMPS. Se replica tal cual, y por eso `ia_service.py` no tiene `try`.
+
+**Tampoco queda rastro de los intentos fallidos:** el `IA_MATCH` del paso 6 sólo se escribe si
+la IA respondió bien, porque en el Java está después de la llamada y sin `try`.
+
+Lo que se descubrió al escribirlo (2026-10-11), midiendo contra AEMPS de verdad:
+
+- **"Hasta 100 resultados" es falso.** AEMPS **ignora** `tamanioPagina` y devuelve páginas de
+  200 (`tamanioPagina=2` → `"tamanioPagina":200` en la respuesta). Se manda igual por fidelidad.
+- **Con un `nregistro` inexistente AEMPS da `204` con cuerpo vacío**, no un JSON de error. Por
+  eso `/medicamento` devuelve el **texto crudo** y no `response.json()`: parsearlo sería
+  `ValueError` → 502, cuando el Java devuelve 200 vacío.
+- **`"resultados": null`** haría `NullPointerException` → 500 en el Java. Aquí se trata como
+  lista vacía → 404, que es lo que significa.
+
+Desviaciones deliberadas del paso 12:
+
+| Desviación | Por qué |
+|---|---|
+| Parámetros en `params=`, no concatenados en la URL | El Java hace `"?nombre=" + nombre`: un `&` en el nombre cuela parámetros en la petición a AEMPS |
+| Timeout de 10 s (AEMPS) y 30 s (IA) | El Java **no tiene ninguno** (`new RestTemplate()` sin configurar, comprobado: ni `RestTemplateBuilder` ni `setReadTimeout` en todo el proyecto). En async una llamada colgada deja la conexión abierta para siempre |
+| Un `httpx.AsyncClient` compartido (lifespan de `main.py`) | El Java crea uno por llamada y no reutiliza conexiones. El sitio correcto allí habría sido un `@Bean` en una `@Configuration` |
+| Falta un query param → 422 | El Java da 400 (es Pydantic, igual que en el resto del proyecto) |
+
+**`tamanioPagina` NO se declara en `/buscar`**, aunque el Angular lo manda
+(`cima.service.ts:18`): el Java tampoco lo declara y Spring lo descarta. Declararlo cambiaría
+lo que ve el catálogo en producción.
 
 ---
 
@@ -460,7 +496,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 
 ## 8. Estado actual
 
-*Actualizado el 2026-10-05.*
+*Actualizado el 2026-10-11.*
 
 | Paso | Qué | Estado |
 |---|---|---|
@@ -476,7 +512,8 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 9 bis | CRUD de usuarios — **hueco del plan original**, ningún paso lo reclamaba | **Hecho y verificado (2026-10-01):** `user_service.py` migrado a las excepciones del paso 8 + chequeo de duplicado, `user_controller.py` con los 5 endpoints y las reglas de rol, alta en `router.py`. 15 comprobaciones: 401 en las 5 rutas sin token, los tres 403 con su `FORBIDDEN_ACTION`, 404/409, y el alta real contra Aiven (201 + fila en `authorities` + hash `$2a$10$`) con borrado físico de limpieza. **Pendiente de probar:** el camino feliz del borrado lógico |
 | 10 | Ventas y cancelaciones: `venta_repository.py`, `venta_cancelada_repository.py`, `venta_service.py`, `venta_cancelada_service.py`, `venta_controller.py`, `venta_cancelada_controller.py` + dos altas en `router.py` | **Hecho y verificado (2026-10-05):** 49 comprobaciones de nivel 2. Los 7 endpoints dan 401 sin token; `/ventas/all` no se lo come `/{username}`; 204 en los dos GET de ventas y `200 []` en `/cancelaciones`; 200 (no 201) al registrar; 404 (no 500) al cancelar una venta inexistente; 422 sin `?responsable=`; el log guarda el username del token y no el `responsable`; el `id` del cliente se ignora en `POST /cancelaciones` |
 | 11 | Activity log: `activity_log_controller.py` + alta en `router.py` con `require_role("SUPERADMIN")` | **Hecho y verificado (2026-10-04):** ruta en el OpenAPI con candado, 401 sin token, 403 con ADMIN y con SELLER, 200 con SUPERADMIN, `ipAddress` en camelCase, orden fecha/hora DESC, y `200 []` (no 204) con la lista vacía. Primer uso real de `require_role` |
-| 12–14 | AEMPS/IA, tests, Docker | Pendiente, inventario en §10 |
+| 12 | AEMPS + IA: `cima_service.py`, `ia_service.py`, `cima_controller.py` + alta en `router.py`, `lifespan` en `main.py` y `get_http_client` en `deps.py` | **Hecho y verificado (2026-10-11):** 30 comprobaciones de nivel 2 más 14 contra AEMPS de verdad. Las 3 rutas dan 401 sin token; 200 con el JSON de AEMPS sin doble serializar; 200 vacío con `nregistro` inexistente (AEMPS da 204); 502 con AEMPS caído, timeout, conexión rechazada y respuesta no-JSON; 409/404 con clave `mensaje`; **500 y no 502 en los cuatro fallos de la IA** (401, 5xx, timeout, caída) y sin escribir el log; `IA_MATCH` con el username del token; `tamanioPagina` no se reenvía; un `&` en el nombre no cuela parámetros; el cliente compartido se crea y se cierra con el `lifespan` |
+| 13–14 | Tests, Docker | Pendiente, inventario en §10 |
 
 **Inventario de lo que falta, decisiones abiertas y trampas ya pagadas: §10.** Está escrito
 para no repetir el análisis.
@@ -772,15 +809,23 @@ errores cae en un `else` genérico. **Consecuencia: la forma del JSON de error e
 (el Java mezclaba `{"error":...}`, `{"mensaje":...}` y strings sueltos), y devolver 404 donde
 el Java daba 500 no rompe nada.
 
-Por eso en Python hay **cinco** excepciones y no dos:
+Por eso en Python hay **cuatro** excepciones y no dos:
 
 | `exceptions/custom.py` | HTTP | Para qué |
 |---|---|---|
 | `ResourceNotFoundException` | 404 | Artículo/usuario/venta que no existe. **Desviación deliberada**: en el Java esto era un 500 |
 | `DuplicateResourceException` | 409 | Unifica los dos chequeos de duplicado que el Java tenía sueltos en cada controlador |
 | `InsufficientStockException` | 409 | No hay unidades para vender. En el Java iba en el MISMO `throw` que el "no encontrado" (`ArticuloService.java:39`) y salía 500 |
-| `AempsNotFoundException` | 404 | AEMPS sin resultados — mismo código que la primera, pero es otro caso (no falta en *nuestra* BD) |
-| `ExternalServiceException` | 502 | AEMPS o el microservicio IA caídos. Único nombre copiado tal cual del Java |
+| `ExternalServiceException` | 502 | **AEMPS** caído. Único nombre copiado tal cual del Java |
+
+**Hubo una quinta, `AempsNotFoundException`, y se borró en el paso 12.** La escribió el paso 8
+para el 404 de "AEMPS sin resultados", pero al llegar al paso 12 resultó que ese 404 del Java
+lleva la clave `mensaje` y el handler emitía `error`, así que el controlador lo devuelve a mano
+y la clase se quedó sin un solo `raise`. Era exactamente el defecto que este mismo documento le
+señala al Java (clase declarada, handler registrado, nadie la lanza), así que fuera.
+
+**Ojo con el 502: es sólo de AEMPS, no del microservicio de IA.** Un fallo de la IA da **500**
+porque el Java no lo captura. Está explicado en el §5.
 
 Más, en `handlers.py` y sin clase propia: `StaleDataError` de SQLAlchemy → **409**, que es el
 equivalente async del `OptimisticLockException` de Hibernate (la lanza el flush/commit cuando
@@ -880,23 +925,48 @@ ejecutaba solo sobre el `DataSource`.
 algo de aquí se contradice con el código, gana el código, pero el razonamiento no hay que
 volver a hacerlo.*
 
-**Estado en una línea:** *(2026-10-05)* **22** de los 25 endpoints vivos (`/auth` ×2 +
-`/articulos` ×7 + `/users` ×5 + `/ventas` ×5 + `/cancelaciones` ×2 + `/activity-log` ×1),
-**3** ficheros de código todavía vacíos.
+**Estado en una línea:** *(2026-10-11)* **los 25 endpoints vivos** (`/auth` ×2 +
+`/articulos` ×7 + `/users` ×5 + `/ventas` ×5 + `/cancelaciones` ×2 + `/activity-log` ×1 +
+`/api/cima` ×3). **No queda código de negocio pendiente**: sólo los 4 ficheros de `tests/`,
+a 0 líneas.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
 | ~~9 bis~~ | ~~CRUD de usuarios~~ — **hecho el 2026-10-01** | — |
 | ~~10~~ | ~~Ventas y cancelaciones~~ — **hecho el 2026-10-05** | — |
 | ~~11~~ | ~~Activity log: sólo falta exponerlo~~ — **hecho el 2026-10-04** | — |
-| 12 | AEMPS + microservicio IA | `cima_service.py`, `ia_service.py`, `cima_controller.py` |
+| ~~12~~ | ~~AEMPS + microservicio IA~~ — **hecho el 2026-10-11** | — |
 | 13 | Tests (decisión ya cerrada en §9) | `tests/conftest.py` y el resto de `tests/` |
 | 14 | Docker y despliegue | `Dockerfile`, `docker-compose.yml`, workflow |
 
+### Dos cosas que salieron del paso 12 y afectan a otros pasos
+
+**1. La IP del `activity_log` será la del proxy, no la del cliente — se arregla en el paso 14.**
+El Java tiene `server.forward-headers-strategy=framework` (`application.properties:32`), que
+hace que `getRemoteAddr()` devuelva la IP real del navegador leyendo `X-Forwarded-For`. En
+Python, `request.client.host` es el otro extremo del socket: detrás de nginx o de Docker
+guardará la IP del proxy. **Afecta a los logs de los pasos 9 bis, 10, 11 y 12**, no sólo al
+`IA_MATCH`. Es configuración de uvicorn, no código: hace falta `--forwarded-allow-ips` en el
+`CMD` del Dockerfile (medido: con el valor por defecto `127.0.0.1`, un proxy que hable desde
+`172.18.0.1` no se considera de confianza y la cabecera se ignora).
+
+**2. `get_current_user` ahora hace `commit()` para soltar la conexión del pool.** Lo descubrió
+el paso 12 porque es el primero que habla con servicios externos: el `SELECT` de autenticación
+retenía una de las 3 conexiones de Aiven **hasta el final de la petición**, así que tres
+búsquedas lentas simultáneas (AEMPS hasta 10 s, IA hasta 30) dejaban sin BD al resto de la API.
+Medido: `checkedout=1` antes del `commit()`, `0` después.
+
+**No usar `rollback()` para esto**, aunque también suelte la conexión: caduca los atributos de
+la entidad (`expired_attributes = ['id', 'name']` tras `rollback`, `[]` tras `commit`, aun con
+`expire_on_commit=False`), y el primer `current_user.username` del endpoint intentaría recargar
+la fila — en async, `MissingGreenlet`.
+
 Del **paso 10** no hay que volver a analizar nada: lo que el Java hace de verdad (que registrar
 una venta no descuenta stock, los dos endpoints muertos, el contraste de 204 entre `/ventas` y
-`/cancelaciones`) está en el §8. **El paso 12 es el único que queda de código de negocio**, y es
-el más complejo de los 25 por el flujo de `/api/cima/validar` (§5).
+`/cancelaciones`) está en el §8. ~~**El paso 12 es el único que queda de código de negocio**, y
+es el más complejo de los 25 por el flujo de `/api/cima/validar` (§5).~~ **Cerrado el
+2026-10-11; ya no queda código de negocio pendiente.** Lo que se descubrió al escribirlo —el
+500 de la IA, el 204 de AEMPS, el `tamanioPagina` que nadie usa— está en el §5.
 
 ~~Del paso 11 ya están hechos `activity_log_repository.py` y `activity_log_service.py`
 (adelantados en el paso 6 porque el login los necesitaba): falta **sólo el controlador**.~~

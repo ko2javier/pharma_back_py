@@ -1,4 +1,8 @@
 # app/main.py
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -9,11 +13,36 @@ from app.exceptions.handlers import register_exception_handlers
 
 settings = get_settings()
 
+
+# ── Cliente HTTP compartido (paso 12) ─────────────────────────────────────
+#
+# Equivale a un @Bean RestTemplate singleton con su @PostConstruct /
+# @PreDestroy: lo de antes del yield se ejecuta al arrancar, lo de después al
+# apagar. Un solo cliente para toda la app reutiliza las conexiones TCP+TLS
+# con cima.aemps.es y con el micro de IA, como el pool de get_db pero para
+# HTTP. El Java hacía new RestTemplate() en cada llamada, sin reutilizar nada.
+#
+# El timeout de 10 s vale para AEMPS; la llamada a la IA lo sube a 30 en
+# ia_service.py. El Java no tenía ninguno.
+#
+# OJO PARA EL PASO 13: httpx.ASGITransport NO ejecuta el lifespan, así que en
+# los tests app.state.http_client no existe. Hay que sustituir get_http_client
+# con dependency_overrides (que es lo que se quiere igualmente: no llamar a
+# AEMPS de verdad desde un test).
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        app.state.http_client = client
+        yield
+    # Al salir del async with se cierran las conexiones: el @PreDestroy.
+
+
 # Equivale a FpApplication.java + SwaggerConfig.java
 app = FastAPI(
     title="EasyFarma API",
     description="Migración del backend farmacia-ko2 a FastAPI (Totalmente Async)",
     version="1.0.0",
+    lifespan=lifespan,
     # FastAPI genera automáticamente la documentación en /docs y /openapi.json
 )
 
