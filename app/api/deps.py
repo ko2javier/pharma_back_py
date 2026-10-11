@@ -5,24 +5,11 @@
 # está deprecado desde Python 3.9).
 import httpx
 from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-import jwt  # PyJWT, no python-jose
+import jwt
 
-# INCORRECTO (lo que había antes):
-#     from jose import JWTError, jwt
-#     from app.core.config import settings  # Donde guardas tu SECRET_KEY
-#
-# Tres fallos a la vez, y ninguno lo pilla el editor porque los tres son
-# nombres que "podrían" existir:
-#   1. 'jose' no es la librería de este proyecto: no está en requirements.txt
-#      (aquí se eligió PyJWT, ya usada en core/security.py). Con solo
-#      requirements.txt instalado, esto es ModuleNotFoundError.
-#   2. config.py no expone ninguna variable 'settings': solo get_settings()
-#      con @lru_cache, a propósito (paso 2), para que los tests puedan
-#      sustituirla. ImportError inmediato, comprobado ejecutando el fichero.
-#   3. Aunque 'settings' existiera, el campo se llama jwt_secret, no
-#      SECRET_KEY.
+
 
 # Importaciones de tu proyecto
 from app.core.database import get_db
@@ -30,9 +17,35 @@ from app.core.security import decode_access_token
 from app.models.user_model import Users
 from app.repositories.user_repository import UserRepository
 
-# Esto le dice a FastAPI y a Swagger dónde está el endpoint de login
-# Actúa como el puente automático para que el botón "Authorize" de Swagger funcione
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+# ANTES: oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+#
+# Pintaba en el botón "Authorize" de Swagger el formulario del flujo OAuth2:
+# usuario, contraseña, client_id y client_secret. Dos problemas:
+#
+#   1. NO FUNCIONABA. Ese formulario envía las credenciales como formulario
+#      (username=...&password=...&grant_type=password) y /auth/login espera
+#      JSON, porque es lo que le manda el Angular. Medido contra el
+#      contenedor: form -> 422, JSON -> 401/200. El candado estaba pintado y
+#      no había manera de conseguir el token por ahí.
+#   2. client_id y client_secret identifican a la APLICACIÓN en un OAuth2 de
+#      verdad (una app de terceros pidiendo acceso a tu cuenta). Esta API no
+#      los usa ni los mirará nunca: dos campos que sólo confunden.
+#
+# HTTPBearer pinta una sola caja donde se pega el token, que es exactamente
+# lo que hace el Swagger del backend Java. El flujo pasa a ser: llamas a
+# /auth/login desde el propio /docs, copias el "token" de la respuesta, lo
+# pegas en Authorize, y a partir de ahí Swagger manda
+# "Authorization: Bearer <token>" en todas las peticiones.
+#
+# Esto NO cambia nada para el Angular: el esquema de seguridad sólo vive en
+# el openapi.json, que únicamente lee Swagger.
+#
+# auto_error=False y el 401 se lanza aquí abajo a mano, por dos razones:
+# para que el cuerpo del error sea el mismo tanto si falta la cabecera como
+# si el token es malo, y porque el código que devuelve HTTPBearer por su
+# cuenta ha cambiado con las versiones de FastAPI (era 403, hoy en la 0.141.1
+# es 401). Con auto_error=False no depende de eso.
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 # -------------------------------------------------------------------
@@ -44,8 +57,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 # 2. DEPENDENCIA DE SEGURIDAD (El filtro de Spring Security)
 # -------------------------------------------------------------------
 async def get_current_user(
-        # FastAPI inyecta aquí el token extraído del header 'Authorization: Bearer <token>'
-        token: str = Depends(oauth2_scheme),
+        # ANTES: token: str = Depends(oauth2_scheme)   -> llegaba el token pelado.
+        # HTTPBearer devuelve un objeto con .scheme ("Bearer") y .credentials
+        # (el token), o None si no vino la cabecera (auto_error=False).
+        credenciales: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
         # Inyectamos la sesión de BD para poder buscar al usuario
         session: AsyncSession = Depends(get_db)
 ) -> Users:
@@ -56,6 +71,13 @@ async def get_current_user(
         detail="No se pudieron validar las credenciales",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    # Sin cabecera Authorization, o con una que no empieza por "Bearer ".
+    if credenciales is None:
+        raise excepcion_credenciales
+
+    token = credenciales.credentials
+
     try:
         # 1. Decodificar el JWT (Equivalente a tu JwtUtil.validateToken en Java)
         payload = decode_access_token(token)

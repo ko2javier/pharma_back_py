@@ -513,7 +513,8 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 10 | Ventas y cancelaciones: `venta_repository.py`, `venta_cancelada_repository.py`, `venta_service.py`, `venta_cancelada_service.py`, `venta_controller.py`, `venta_cancelada_controller.py` + dos altas en `router.py` | **Hecho y verificado (2026-10-05):** 49 comprobaciones de nivel 2. Los 7 endpoints dan 401 sin token; `/ventas/all` no se lo come `/{username}`; 204 en los dos GET de ventas y `200 []` en `/cancelaciones`; 200 (no 201) al registrar; 404 (no 500) al cancelar una venta inexistente; 422 sin `?responsable=`; el log guarda el username del token y no el `responsable`; el `id` del cliente se ignora en `POST /cancelaciones` |
 | 11 | Activity log: `activity_log_controller.py` + alta en `router.py` con `require_role("SUPERADMIN")` | **Hecho y verificado (2026-10-04):** ruta en el OpenAPI con candado, 401 sin token, 403 con ADMIN y con SELLER, 200 con SUPERADMIN, `ipAddress` en camelCase, orden fecha/hora DESC, y `200 []` (no 204) con la lista vacía. Primer uso real de `require_role` |
 | 12 | AEMPS + IA: `cima_service.py`, `ia_service.py`, `cima_controller.py` + alta en `router.py`, `lifespan` en `main.py` y `get_http_client` en `deps.py` | **Hecho y verificado (2026-10-11):** 30 comprobaciones de nivel 2 más 14 contra AEMPS de verdad. Las 3 rutas dan 401 sin token; 200 con el JSON de AEMPS sin doble serializar; 200 vacío con `nregistro` inexistente (AEMPS da 204); 502 con AEMPS caído, timeout, conexión rechazada y respuesta no-JSON; 409/404 con clave `mensaje`; **500 y no 502 en los cuatro fallos de la IA** (401, 5xx, timeout, caída) y sin escribir el log; `IA_MATCH` con el username del token; `tamanioPagina` no se reenvía; un `&` en el nombre no cuela parámetros; el cliente compartido se crea y se cierra con el `lifespan` |
-| 13–14 | Tests, Docker | Pendiente, inventario en §10 |
+| 13 | Tests: `pytest.ini` + `tests/` (13 ficheros) | **Hecho y verificado (2026-10-11):** **195 tests en verde en 1,6 s**, niveles 1 y 2, sin tocar Aiven. Y comprobado que la batería caza lo que dice cazar: cinco bugs reales inyectados de uno en uno (quitar el gate de `/articulos` de `router.py`, `require_role` con prefijo `ROLE_`, token de 24 h, el SELLER pudiendo crear usuarios, `/cancelaciones` devolviendo 204) la ponen roja los cinco. Detalle en §9 bis |
+| 14 | Docker y despliegue | Pendiente, inventario en §10 |
 
 **Inventario de lo que falta, decisiones abiertas y trampas ya pagadas: §10.** Está escrito
 para no repetir el análisis.
@@ -778,6 +779,46 @@ Detalle relacionado, comprobado al tocar `VentaCancelada`: **SQLAlchemy aplica e
 la columna incluso si le pasas `fecha=None` explícitamente**, no sólo cuando omites el campo.
 Por eso el service puede pasar `fecha=datos.fecha` sin comprobar si viene vacío.
 
+### El botón *Authorize* de Swagger: `HTTPBearer` en vez de `OAuth2PasswordBearer` (2026-10-11)
+
+Salió al probar la imagen de Docker. `deps.py` declaraba
+`OAuth2PasswordBearer(tokenUrl="/auth/login")`, que hace que `/docs` pinte el formulario del
+flujo OAuth2 —usuario, contraseña, `client_id` y `client_secret`— **y no funcionaba**: ese
+formulario envía las credenciales como `application/x-www-form-urlencoded` y `/auth/login`
+espera JSON, porque es lo que manda el Angular. Medido contra el contenedor:
+
+| Petición a `/auth/login` | Código |
+|---|---|
+| `username=ko2&password=1234&grant_type=password` (lo que manda el botón) | **422** |
+| `{"username": "ko2", "password": "..."}` (lo que manda el Angular) | 401 / 200 |
+
+El candado salía pintado en las 24 operaciones y no había forma de conseguir el token por ahí.
+Además, `client_id` y `client_secret` identifican a la **aplicación** en un OAuth2 de verdad:
+esta API no los usa ni los va a usar.
+
+Se cambia a `HTTPBearer(auto_error=False)`, que pinta una sola caja donde se pega el token —
+exactamente como el Swagger del backend Java. **No afecta al Angular**: el esquema de seguridad
+vive sólo en el `openapi.json`, que únicamente lee Swagger.
+
+Se descartó a propósito la alternativa cómoda (un `/auth/token` aparte que acepte formulario,
+que es lo idiomático en FastAPI): sería una **segunda puerta de autenticación** que hay que
+mantener en sintonía con la primera cada vez que cambie una regla del login, y un endpoint 26
+que el Java no tiene. Decisión de Jabier tras ver las tres opciones.
+
+`auto_error=False` y el 401 lanzado a mano, por dos motivos: así el cuerpo del error es el
+mismo falte la cabecera o sea el token inválido, y el código que devuelve `HTTPBearer` por su
+cuenta ha cambiado entre versiones de FastAPI (era 403, en la 0.141.1 es 401). Comprobado tras
+el cambio, los tres casos iguales:
+
+    sin cabecera          -> 401 {"detail": "No se pudieron validar las credenciales"}
+    Bearer <token malo>   -> 401 (idem)
+    Authorization sin "Bearer" -> 401 (idem)
+
+y `WWW-Authenticate: Bearer` en los tres. Los 195 tests siguen en verde; el único que se cayó
+fue el que comprueba el esquema del OpenAPI, que es justo para lo que estaba puesto.
+
+---
+
 ## 8 bis. Los errores (paso 8) — lo que el Java hacía de verdad
 
 Leyendo `GlobalExceptionHandler.java` y cruzándolo con el frontend Angular (2026-09-28):
@@ -919,6 +960,67 @@ ejecutaba solo sobre el `DataSource`.
 
 ---
 
+## 9 bis. Los tests escritos (paso 13, cerrado el 2026-10-11)
+
+**195 tests, 13 ficheros, 1,6 s, ni una conexión a Aiven.** Niveles 1 y 2 del §9; el nivel 3
+(Testcontainers) sigue siendo opcional y no se ha hecho.
+
+| Fichero | Tests | Qué fija |
+|---|---|---|
+| `conftest.py` | — | las fixtures: cliente, sesión falsa, `autenticar`, cliente HTTP falso, fábricas de entidades |
+| `test_security.py` | 17 | nivel 1: los 4 claims del JWT, las 10 h, el rol sin `ROLE_`, los 6 rechazos (manipulado, otro secreto, caducado, `alg=none`, sin `sub`, sin `exp`) y bcrypt `$2a$10$` |
+| `test_router_gate.py` | 26 | el inventario de las 26 operaciones y que sólo `/` y `/auth/login` están abiertas, leído del OpenAPI **y** comprobado con 24 peticiones sin token |
+| `test_health.py` | 4 | `/`, el OpenAPI y el `tokenUrl` del botón *Authorize* |
+| `test_auth_controller.py` | 14 | login 200/401/422, el token emitido, `LOGIN_SUCCESS` y `LOGIN_FAILED` |
+| `test_articulo_controller.py` | 22 | los 204, el 404 del lote vacío, 404/409/409 de las excepciones, `aempsCode` |
+| `test_user_controller.py` | 25 | las tres reglas de rol con su control negativo, 201, 409, 404 |
+| `test_venta_controller.py` | 15 | 204 vs 200, el 200 que no es 201, el 422 sin `responsable`, quién firma vs quién lo pide |
+| `test_venta_cancelada_controller.py` | 7 | el `200 []` que **no** es 204, el no-307, el `id` del cliente ignorado |
+| `test_activity_log_controller.py` | 9 | 401/403/403/200 y el `200 []` |
+| `test_cima_controller.py` | 22 | el JSON sin doble serializar, el 204 de AEMPS, los 502, y **el 500 de la IA sin `IA_MATCH`** |
+| `test_articulo_service.py` | 12 | nivel 1: el lote que se corta entero, el límite exacto del stock, el bucle del código único |
+| `test_user_service.py` | 15 | nivel 1: los tres `None` de `authenticate_user`, el duplicado antes de hashear, el borrado lógico |
+| `test_venta_service.py` | 7 | nivel 1: la transacción de dos escrituras de `cancelar_venta` |
+
+**La batería está probada contra sí misma.** Se inyectaron cinco bugs reales, de uno en uno, y
+los cinco la ponen roja (los ficheros se restauraron después):
+
+| Bug inyectado | Resultado |
+|---|---|
+| `include_router(articulo_router)` sin `dependencies` | 6 fallos |
+| `require_role` comparando con el prefijo `ROLE_` | 5 fallos |
+| `ACCESS_TOKEN_EXPIRE_HOURS = 24` | 1 fallo |
+| El SELLER vuelve a poder crear usuarios (como en el Java) | 1 fallo |
+| `/cancelaciones` devolviendo 204 con lista vacía | 1 fallo |
+
+Lo que se aprendió escribiéndolos, y no estaba en el §9:
+
+- **`ASGITransport` necesita `raise_app_exceptions=False`.** Es el equivalente del
+  `raise_server_exceptions=False` del `TestClient`: Starlette, *después* de pasar la excepción
+  por el handler genérico, siempre la vuelve a lanzar. Medido: con el valor por defecto el test
+  recibe el `RuntimeError` pelado; con `False`, el `500 {"error": ...}`. Sin esto no se puede
+  probar el 500 de la IA.
+- **Los hijos de un `AsyncMock` también son `AsyncMock`.** Fingir
+  `session.execute(...).scalar_one_or_none()` con el mock por defecto devuelve una **corrutina**,
+  y el service revienta con `AttributeError: 'coroutine' object has no attribute 'role'`, que no
+  se parece en nada al problema. Hay que montar ese trozo con `MagicMock` a mano.
+- **`spec=AsyncSession` en la sesión falsa** convierte un `sesion.commti()` en `AttributeError`
+  en vez de en un mock nuevo que pasa en verde. Es la red contra el bug recurrente del proyecto.
+- **El mock del repositorio tiene que cubrir el método que el service usa de verdad.**
+  `delete_articulo_by_id` comprueba con `exists_by_id`, no con `find_by_id`; al dejarla sin
+  mockear, el repositorio real corrió contra la sesión falsa y `result.scalar()` devolvió un
+  mock "verdadero". Lo cazó el test, no el import.
+- **El `.env` se resolvía contra el directorio de trabajo** (`env_file=".env"`), así que lanzar
+  los tests desde otra carpeta mataba el import de la app con los 9 campos obligatorios de
+  `Settings` ausentes — y era el mismo motivo por el que PyCharm no podía ejecutar
+  `app\main.py`. Arreglado con `_PROJECT_ROOT / ".env"`, el mismo criterio que ya tenía el
+  `ca.pem`.
+- **No hace falta cerrar el engine** en los niveles 1 y 2: no se abre ninguna conexión (medido,
+  `engine.pool.checkedout() == 0`). El `await engine.dispose()` del §9 hará falta cuando llegue
+  el nivel 3.
+
+---
+
 ## 10. Pendientes — inventario y análisis ya hecho
 
 *Cerrado el 2026-09-28. **Esto está escrito para no repetir el mismo análisis tres veces**: si
@@ -927,8 +1029,8 @@ volver a hacerlo.*
 
 **Estado en una línea:** *(2026-10-11)* **los 25 endpoints vivos** (`/auth` ×2 +
 `/articulos` ×7 + `/users` ×5 + `/ventas` ×5 + `/cancelaciones` ×2 + `/activity-log` ×1 +
-`/api/cima` ×3). **No queda código de negocio pendiente**: sólo los 4 ficheros de `tests/`,
-a 0 líneas.
+`/api/cima` ×3). **No queda código de negocio pendiente, y desde el 2026-10-11 tampoco tests**: 195 en verde
+(§9 bis). Lo único que falta es el **paso 14**, Docker y despliegue.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
@@ -936,7 +1038,7 @@ a 0 líneas.
 | ~~10~~ | ~~Ventas y cancelaciones~~ — **hecho el 2026-10-05** | — |
 | ~~11~~ | ~~Activity log: sólo falta exponerlo~~ — **hecho el 2026-10-04** | — |
 | ~~12~~ | ~~AEMPS + microservicio IA~~ — **hecho el 2026-10-11** | — |
-| 13 | Tests (decisión ya cerrada en §9) | `tests/conftest.py` y el resto de `tests/` |
+| ~~13~~ | ~~Tests~~ — **hecho el 2026-10-11**, 195 en verde (§9 bis) | — |
 | 14 | Docker y despliegue | `Dockerfile`, `docker-compose.yml`, workflow |
 
 ### Dos cosas que salieron del paso 12 y afectan a otros pasos

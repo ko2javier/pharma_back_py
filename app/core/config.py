@@ -105,7 +105,13 @@ class Settings(BaseSettings):
     # variables para otras herramientas (HOST_PORT para Docker, por ejemplo)
     # sin tumbar el arranque.
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # ANTES: env_file=".env"
+        # Ruta relativa al directorio desde el que se LANZA el proceso. Con
+        # PyCharm ejecutando app\main.py el cwd es ...pp, ahi no hay .env y
+        # los 9 campos obligatorios salian como "Field required" de golpe.
+        # Mismo criterio que aiven_ca_file: un fichero de la raiz se resuelve
+        # contra la raiz.
+        env_file=_PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )

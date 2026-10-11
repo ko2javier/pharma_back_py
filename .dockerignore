@@ -1,0 +1,39 @@
+# Lo que NO entra en la imagen.
+#
+# Sin este fichero, "docker build" empaqueta la carpeta entera y se la manda
+# al demonio de Docker: el .venv solo ya son cientos de megas, y encima
+# acabaria dentro de la imagen un entorno virtual de Windows que alli no
+# sirve para nada.
+
+# El entorno virtual local (Windows). La imagen instala lo suyo con pip.
+.venv/
+
+# Los tests y sus dependencias no van a produccion.
+tests/
+pytest.ini
+
+# Historia de git, configuracion del IDE y del asistente: nada que ejecutar.
+.git/
+.gitignore
+.idea/
+.claude/
+
+# OJO con el ** : los patrones de .dockerignore NO son recursivos por si
+# solos. Con "__pycache__/" a secas solo se ignora el de la RAIZ, y
+# app/api/routes/__pycache__ entra igual en la imagen (comprobado: estaba
+# dentro). Con ** se ignoran en cualquier nivel.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# CREDENCIALES. La linea mas importante del fichero: el .env tiene el
+# JWT_SECRET, la contrasena de Aiven y la api-key de la IA. En produccion las
+# variables las inyecta docker-compose; dentro de la imagen no van jamas.
+.env
+
+# Documentacion. El ESTRUCTURA.md son 70 KB que no hacen falta para ejecutar.
+*.md
+
+# La clave privada de despliegue, por si alguna vez aparece por aqui.
+*.pem
+!ca.pem
