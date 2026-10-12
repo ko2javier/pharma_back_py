@@ -490,7 +490,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 11 | Activity log | íd. activity log |
 | 12 | AEMPS + microservicio IA | `cima_service.py`, `ia_service.py`, `routes/cima_controller.py` |
 | 13 | Tests | `tests/*` |
-| 14 | Docker y despliegue | `Dockerfile`, `docker-compose.yml`, workflow |
+| ~~14~~ | ~~Docker y despliegue~~ — **hecho el 2026-10-12**, desplegado en AWS (§11) | — |
 
 ---
 
@@ -514,7 +514,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 11 | Activity log: `activity_log_controller.py` + alta en `router.py` con `require_role("SUPERADMIN")` | **Hecho y verificado (2026-10-04):** ruta en el OpenAPI con candado, 401 sin token, 403 con ADMIN y con SELLER, 200 con SUPERADMIN, `ipAddress` en camelCase, orden fecha/hora DESC, y `200 []` (no 204) con la lista vacía. Primer uso real de `require_role` |
 | 12 | AEMPS + IA: `cima_service.py`, `ia_service.py`, `cima_controller.py` + alta en `router.py`, `lifespan` en `main.py` y `get_http_client` en `deps.py` | **Hecho y verificado (2026-10-11):** 30 comprobaciones de nivel 2 más 14 contra AEMPS de verdad. Las 3 rutas dan 401 sin token; 200 con el JSON de AEMPS sin doble serializar; 200 vacío con `nregistro` inexistente (AEMPS da 204); 502 con AEMPS caído, timeout, conexión rechazada y respuesta no-JSON; 409/404 con clave `mensaje`; **500 y no 502 en los cuatro fallos de la IA** (401, 5xx, timeout, caída) y sin escribir el log; `IA_MATCH` con el username del token; `tamanioPagina` no se reenvía; un `&` en el nombre no cuela parámetros; el cliente compartido se crea y se cierra con el `lifespan` |
 | 13 | Tests: `pytest.ini` + `tests/` (13 ficheros) | **Hecho y verificado (2026-10-11):** **195 tests en verde en 1,6 s**, niveles 1 y 2, sin tocar Aiven. Y comprobado que la batería caza lo que dice cazar: cinco bugs reales inyectados de uno en uno (quitar el gate de `/articulos` de `router.py`, `require_role` con prefijo `ROLE_`, token de 24 h, el SELLER pudiendo crear usuarios, `/cancelaciones` devolviendo 204) la ponen roja los cinco. Detalle en §9 bis |
-| 14 | Docker y despliegue | Pendiente, inventario en §10 |
+| 14 | Docker y despliegue | **Hecho el 2026-10-12:** `Dockerfile`, `.dockerignore`, `docker-compose.yml` y workflow de build. Desplegado en **AWS** (ECR + OIDC + EC2 con rol de instancia, Fráncfort), probado contra Aiven desde allí. Queda automatizar el despliegue y meter los tests en el workflow. Detalle en §11 |
 
 **Inventario de lo que falta, decisiones abiertas y trampas ya pagadas: §10.** Está escrito
 para no repetir el análisis.
@@ -1030,7 +1030,7 @@ volver a hacerlo.*
 **Estado en una línea:** *(2026-10-11)* **los 25 endpoints vivos** (`/auth` ×2 +
 `/articulos` ×7 + `/users` ×5 + `/ventas` ×5 + `/cancelaciones` ×2 + `/activity-log` ×1 +
 `/api/cima` ×3). **No queda código de negocio pendiente, y desde el 2026-10-11 tampoco tests**: 195 en verde
-(§9 bis). Lo único que falta es el **paso 14**, Docker y despliegue.
+(§9 bis). **El paso 14 se cerró el 2026-10-12**: la API corre en una EC2 de Fráncfort con la imagen bajada de ECR (§11). Lo que queda no es código: automatizar el despliegue, los tests en el workflow y el microservicio de IA.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
@@ -1210,10 +1210,105 @@ que crear un usuario, darle una venta y dejar la fila deshabilitada en Aiven.
 
 ---
 
+---
+
+## 11. El despliegue en AWS (paso 14) — hecho y desmontado el 2026-10-12
+
+> **Desmontado el mismo 2026-10-12.** El ejercicio de AWS estaba hecho y el destino es Hetzner, asi que se termino la instancia y se borro todo (ECR, roles, proveedor OIDC). Comprobado en la consola: nada encendido. Esta seccion se queda como **receta y lecciones**, no como descripcion de algo vivo.
+
+Decisión de Jabier: el destino no es Hetzner, sino **AWS**, como ejercicio práctico de cara a
+entrevistas. Todo vive en **`eu-central-1` (Fráncfort)**.
+
+**Por qué Fráncfort y no Virginia** (que era donde tenía cosas antes): se midió desde el VPS que
+el MySQL de Aiven está en **Ámsterdam**, RTT 26 ms. Desde Virginia cada consulta serían ~85-95 ms
+de ida y vuelta, y un endpoint con tres consultas se comería ~280 ms sólo en viajes.
+
+### Las piezas
+
+| Pieza | Nombre | Para qué |
+|---|---|---|
+| Registro de imágenes | `pharma-back-py`, `pharma-gpt-micro` (ECR privado) | la imagen que se despliega, con regla de ciclo de vida |
+| Proveedor OIDC | `token.actions.githubusercontent.com` | que AWS se crea los carnés que firma GitHub |
+| Rol para CI | `github-actions-pharma-ecr` | lo asume el workflow unos minutos: sólo subir imágenes a esos dos repositorios |
+| Rol de instancia | `ec2-pharma-rol` | `AmazonEC2ContainerRegistryReadOnly` + `AmazonSSMManagedInstanceCore` |
+| Máquina | `pharma-py`, t3.micro, Amazon Linux 2023 | Docker + compose + 1 GB de swap, instalados por el `user data` |
+| Grupo de seguridad | `pharma-py-sg` | **sin reglas de entrada**: se entra por Session Manager |
+
+**La idea que lo ordena todo: no hay una sola credencial guardada en ningún sitio.** GitHub firma
+un carné temporal que dice qué repositorio y qué rama es; AWS lo verifica y presta el rol unos
+minutos. La instancia pide sus credenciales por ser ella, y caducan solas. Si alguien se llevara
+el disco de la máquina, no se llevaría nada reutilizable.
+
+### La trampa del `sub` — tres ejecuciones perdidas
+
+El workflow fallaba con `Not authorized to perform sts:AssumeRoleWithWebIdentity` con **todo
+correcto**: proveedor, público `sts.amazonaws.com`, huella del certificado y ARN, comparados
+carácter a carácter. La causa sólo apareció al volcar los campos del carné (nunca el token):
+
+| | |
+|---|---|
+| Lo que exige el asistente de AWS | `repo:ko2javier/pharma_back_py:ref:refs/heads/master` |
+| Lo que emite GitHub hoy | `repo:ko2javier@100034012/pharma_back_py@1374068965:ref:refs/heads/master` |
+
+GitHub mete los **identificadores numéricos inmutables** de cuenta y repositorio. Es a propósito:
+con sólo nombres, quien borra un repositorio y crea otro con el mismo nombre hereda la confianza.
+La consola de AWS todavía genera el formato viejo. La condición del rol lleva ahora **las dos
+formas**, con los IDs exactos y sin comodines.
+
+**Regla que queda:** si AWS dice "no autorizado" en OIDC, el sospechoso es el `sub`, no la
+política. Mirar el carné de verdad cuesta una ejecución.
+
+### Lo demás que se aprendió escribiéndolo
+
+- **No se construye la imagen en el servidor**, y eso resuelve dos cosas a la vez: el repositorio
+  es privado (así la máquina no necesita acceso al código, sólo lectura en ECR) y tiene 1 GB de
+  RAM (un `pip install` ahí dentro es candidato a morir por OOM).
+- **`cache-to: type=gha` exige el driver `docker-container`**, que no es el de por defecto del
+  runner: falta `docker/setup-buildx-action` y el build muere con `Cache export is not supported
+  for the docker driver`. Sin caché habría funcionado: lo rompió la optimización.
+- **Cada build de buildx crea tres entradas en ECR** (índice, capas y certificado de procedencia).
+  Con una regla de ciclo de vida que cuenta imágenes, eso descuadra; se desactivó la procedencia
+  con `provenance: false`.
+- **`paths-ignore` para `**.md`**: un cambio de documentación no reconstruye la imagen. Es el
+  problema que sí tiene el repo del back de Java.
+- **Dos etiquetas por imagen**, `latest` y el SHA del commit. Sin la segunda no hay forma de
+  saber qué código está corriendo ni a qué volver.
+
+### Lo medido en la instancia
+
+| Prueba | Resultado |
+|---|---|
+| `docker images` | 193 MB (65,79 comprimidos en ECR), digest idéntico al de ECR |
+| `GET /` | 200 |
+| `GET /users/all` sin token | 401 |
+| `POST /auth/login` con usuario inventado | **401, no 500** — llegó a Aiven; el TLS con el `ca.pem` funciona desde AWS |
+| `GET /docs` | 200 |
+| Logs del contenedor | ninguna consulta SQL: `ENVIRONMENT=prod` llegó |
+| RAM | 328 MB de 913, swap intacto — cabe el microservicio de IA al lado |
+
+### Lo que queda abierto (ahora, para Hetzner)
+
+1. **El despliegue sigue siendo manual**: el workflow sube la imagen a ECR, pero a la instancia hay que
+   entrar por Session Manager y hacer `docker compose pull && up -d`. La vía limpia para
+   automatizarlo es `ssm:SendCommand` desde Actions, sin abrir el 22 ni guardar claves. **Ese
+   commit tiene que meter el repo en `REPOS_QUE_DESPLIEGAN` del `guard_push.py`.**
+2. **El microservicio de IA no está en la instancia**: `/api/cima/validar` es el único de los 25
+   que no funciona allí.
+3. **El workflow no ejecuta los 195 tests.** Hoy es despliegue continuo, no CI/CD. Es el repo más
+   barato donde arreglarlo: 1,6 s y sin base de datos.
+4. **La regla temporal del puerto 8001** (HTTP sin cifrar, con el `JWT_SECRET` de producción
+   detrás) hay que borrarla cuando no se use.
+
+**Y lo que no hay que perder de vista:** esa instancia escribe en la **base de datos de
+producción** y comparte el `JWT_SECRET` con el backend Java — comprobado, misma huella. No es un
+entorno de pruebas.
+
+---
+
 **Entornos.** Este documento se escribió en el PC Linux, con un `.venv` de Python 3.12.3
 (FastAPI 0.141.1, uvicorn 0.52.4, pydantic 2.13.5). En el PC Windows el proyecto vive en
 `ko2-python-backends\pharma_back_py` y su `.venv` lo creó PyCharm con **Python 3.14.0**,
 que no es la versión contra la que están fijadas las dependencias. Tenerlo presente si
 `aiomysql` o `sqlalchemy` dan problemas al instalarse.
 
-Pendiente: todo lo demás.
+Pendiente: lo listado al final del §11.
