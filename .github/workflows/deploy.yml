@@ -1,18 +1,23 @@
-# Construye la imagen y la sube a ECR (Amazon Elastic Container Registry).
+# Construye la imagen y la sube a ghcr.io, el registro de imagenes de GitHub.
 #
-# Lo que NO hay aqui, y es deliberado: ni una credencial de AWS. Los workflows
-# de los otros proyectos guardan claves en los secrets de GitHub; este no
-# guarda ninguna. Usa OIDC: GitHub firma un carne temporal que dice "soy el
-# repo ko2javier/pharma_back_py en la rama master", AWS lo verifica contra las
-# claves publicas de GitHub y, si coincide con lo autorizado en el rol, le
-# presta ese rol unos minutos. No hay nada que rotar ni que se pueda filtrar.
+# Estuvo apuntando a ECR (el registro de AWS) del 11 al 12/10/2026, mientras la
+# API vivio en una EC2 de Francfort. Al volver el destino a Hetzner, ECR deja de
+# tener sentido: ghcr.io es gratis, vive al lado del codigo y es lo que ya usa
+# llm-gateway-resilience. Lo que se aprendio alli esta en ESTRUCTURA.md §11.
 #
-# El despliegue en la instancia todavia NO esta aqui: de momento esto solo
-# deja la imagen publicada en ECR. El paso de desplegar se anade cuando la
-# EC2 exista, y ese mismo dia hay que meter este repositorio en la lista
-# REPOS_QUE_DESPLIEGAN del hook guard_push.py.
+# No hay ninguna credencial que crear: GITHUB_TOKEN lo genera Actions para esta
+# ejecucion y caduca al terminar el job.
+#
+# OJO con la visibilidad del paquete: el primero que se publica nace PRIVADO,
+# aunque el repositorio sea publico. Si el servidor va a bajarselo sin
+# autenticarse, hay que ponerlo publico a mano una vez (Packages -> package
+# settings -> change visibility).
+#
+# El despliegue en el servidor todavia NO esta aqui: esto solo deja la imagen
+# publicada. El dia que se anada, ese mismo commit tiene que meter el
+# repositorio en REPOS_QUE_DESPLIEGAN del hook guard_push.py.
 
-name: Build and push to ECR
+name: Build and push
 
 on:
   push:
@@ -20,7 +25,7 @@ on:
       - master
     paths-ignore:
       # Un cambio de documentacion no cambia la imagen: reconstruirla seria
-      # gastar minutos de Actions y una version nueva en ECR para nada. Esto
+      # gastar minutos de Actions y una version nueva en el registro para nada. Esto
       # es justo el problema que tiene el repo del back de Java, donde un
       # README reconstruye el contenedor entero.
       - '**.md'
@@ -31,34 +36,33 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: eu-central-1
-  ECR_REPOSITORY: pharma-back-py
+  # ghcr.io, el registro de imagenes de GitHub. El owner tiene que ir en
+  # minusculas: ghcr.io las exige y "ko2javier" ya lo esta.
+  IMAGEN: ghcr.io/ko2javier/pharma-back-py
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
-    # Sin estos dos permisos el OIDC no funciona, y el error que da
-    # ("Credentials could not be loaded") no explica el motivo:
-    #   id-token: write  -> deja que el job pida el carne firmado a GitHub
-    #   contents: read   -> deja que el checkout lea el codigo
+    # packages: write es lo que deja publicar en ghcr.io; contents: read, lo que
+    # deja al checkout leer el codigo. Antes habia ademas id-token: write, que
+    # era para pedirle el carne OIDC a AWS: ya no hace falta.
     permissions:
-      id-token: write
       contents: read
+      packages: write
 
     steps:
       - name: Descargar el codigo
         uses: actions/checkout@v4
 
-      - name: Pedir credenciales temporales a AWS
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Entrar en el registro de GitHub
+        # Sin secretos que crear: GITHUB_TOKEN lo genera Actions para esta
+        # ejecucion y caduca al terminar el job.
+        uses: docker/login-action@v3
         with:
-          role-to-assume: arn:aws:iam::<ID-DE-CUENTA-AWS>:role/github-actions-pharma-ecr
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Entrar en el registro
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Preparar buildx
         # Sin esto el build falla con "Cache export is not supported for the
@@ -80,15 +84,20 @@ jobs:
           #             que version era. Sin esta, "latest" es un agujero
           #             negro: no hay forma de saber que codigo esta corriendo.
           tags: |
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ env.IMAGEN }}:latest
+            ${{ env.IMAGEN }}:${{ github.sha }}
           # Cache entre ejecuciones: sin esto, cada push reinstala las 10
           # dependencias de requirements.txt desde cero (unos 40 s tirados).
+          # Sin esto, buildx sube ademas un certificado de procedencia y un
+          # indice, y en el registro cada construccion aparece como TRES entradas en
+          # vez de una. No lo usamos para nada y descuadra la regla de ciclo
+          # de vida, que cuenta imagenes.
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Decir que ha quedado publicado
         run: |
           echo "Imagen publicada:"
-          echo "  ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
-          echo "  ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          echo "  ${{ env.IMAGEN }}:latest"
+          echo "  ${{ env.IMAGEN }}:${{ github.sha }}"
