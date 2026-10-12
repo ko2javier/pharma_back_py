@@ -20,3 +20,6 @@ __pycache__/
 
 # SO
 .DS_Store
+
+# Notas de trabajo locales (memorias del asistente): no se publican
+.claude/
