@@ -1,25 +1,40 @@
-# docker-compose.yml -- como se LEVANTA la API en el servidor.
+# docker-compose.yml -- como se LEVANTA la API en el servidor (Hetzner).
 #
 # Diferencia de fondo con el compose del Java (fp_api): ese lleva "build: ." y
-# construye la imagen en el propio servidor. Este NO construye nada: se baja
-# una imagen ya hecha de ECR. Dos motivos, los dos reales:
+# construye la imagen en el propio servidor, en cada push. Este NO construye
+# nada: se baja una imagen ya hecha de ghcr.io, el registro de GitHub. Dos
+# motivos, los dos reales:
 #
-#   1. La instancia de AWS es una t3.micro con 1 GB de RAM. Un "pip install"
-#      dentro de un build con tan poca memoria es el candidato numero uno a
-#      morir por OOM, y el fallo aparece a mitad del despliegue, no antes.
-#   2. El repositorio es privado desde el 2026-09-20. Con "build" el servidor
-#      tendria que clonar el codigo, y eso exige meterle una deploy key.
-#      Bajando la imagen, el servidor NO necesita acceso al repositorio: solo
-#      permiso de lectura en ECR, y ese permiso se lo da el ROL de la
-#      instancia, sin una sola credencial escrita en disco.
+#   1. Construir en el servidor es construir SIN RED DE SEGURIDAD: el "pip
+#      install" corre en la maquina que atiende a los usuarios y compite por su
+#      RAM con los otros once contenedores. Aqui la imagen llega ya probada
+#      -- el workflow no la publica si alguno de los 195 tests falla.
+#   2. Con "build" el servidor necesitaria el codigo, y por tanto acceso al
+#      repositorio (una deploy key). Bajando la imagen sólo necesita permiso de
+#      lectura en el paquete.
+#
+# Estuvo apuntando a ECR (el registro de AWS) del 11 al 12/10/2026, mientras la
+# API vivio en una EC2 de Francfort. Al volver el destino a Hetzner, ghcr.io es
+# lo que tiene sentido: gratis, al lado del codigo, y lo que ya usa
+# llm-gateway-resilience.
+#
+# EL PAQUETE ES PRIVADO (comprobado el 12/10/2026: un manifest anonimo devuelve
+# 403), asi que el servidor tiene que identificarse UNA vez antes del primer
+# pull:
+#     docker login ghcr.io -u ko2javier    # contrasena = un PAT con read:packages
+# El dia que el repositorio se haga publico y el paquete con el, ese login deja
+# de hacer falta y se puede borrar con "docker logout ghcr.io".
 
 services:
   app:
-    # Sin "build". La imagen la construye GitHub Actions y la publica en ECR.
-    # El registro no se escribe a pelo porque lleva dentro el numero de cuenta
-    # de AWS y la region; va en el .env del servidor, como el resto:
-    #     ECR_REGISTRY=<cuenta>.dkr.ecr.<region>.amazonaws.com
-    image: ${ECR_REGISTRY}/pharma-back-py:${IMAGE_TAG:-latest}
+    # Sin "build". La imagen la construye GitHub Actions y la publica aqui.
+    # El owner va en minusculas porque ghcr.io lo exige.
+    #
+    # IMAGE_TAG se deja en variable para poder volver atras sin tocar este
+    # fichero: por defecto "latest", pero con IMAGE_TAG=<sha> en el .env se
+    # levanta el commit exacto que uno quiera. El workflow publica las dos
+    # etiquetas justo para esto.
+    image: ghcr.io/ko2javier/pharma-back-py:${IMAGE_TAG:-latest}
     container_name: fp_api_py
     restart: unless-stopped
     env_file:
@@ -40,21 +55,23 @@ services:
       FORWARDED_ALLOW_IPS: "*"
     ports:
       # <host>:<contenedor>. Dentro siempre 8001, que es lo que fija PORT en el
-      # Dockerfile y lo que exige Settings. Fuera, lo que diga HOST_PORT: se
-      # deja en variable porque en Hetzner el 5050 ya es del Java y alli habria
-      # que elegir otro puerto sin tocar este fichero.
+      # Dockerfile y lo que exige Settings. Fuera, lo que diga HOST_PORT: en
+      # Hetzner el 5050 ya es del Java (fp_api), asi que alli va 5051
+      # -- comprobado libre el 12/10/2026 con "ss -ltnp".
       - "${HOST_PORT:-8001}:8001"
     networks:
       - farmacia-ko2-network
 
 networks:
-  # external: true significa "esta red ya existe, no la crees tu". Es la misma
-  # decision que en Hetzner, y el motivo es que el microservicio de IA vive en
-  # OTRO repositorio con su propio compose: si cada uno creara su red, los dos
-  # contenedores estarian en redes distintas y http://fp_gpt:8000 no resolveria
-  # (fallaria /api/cima/validar, y solo en produccion).
+  # external: true significa "esta red ya existe, no la crees tu". El motivo es
+  # que el microservicio de IA vive en OTRO repositorio con su propio compose:
+  # si cada uno creara su red, los dos contenedores estarian en redes distintas
+  # y http://fp_gpt:8000 no resolveria (fallaria /api/cima/validar, y solo en
+  # produccion).
   #
-  # Hay que crearla UNA vez en la instancia, antes del primer "up":
+  # En Hetzner la red YA existe, con fp_gpt y fp_api dentro (comprobado el
+  # 12/10/2026). En una maquina nueva habria que crearla una vez antes del
+  # primer "up":
   #     docker network create farmacia-ko2-network
   farmacia-ko2-network:
     external: true
