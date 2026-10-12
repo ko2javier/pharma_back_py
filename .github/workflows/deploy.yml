@@ -1,4 +1,9 @@
-# Construye la imagen y la sube a ghcr.io, el registro de imagenes de GitHub.
+# Ejecuta los 195 tests y, SOLO si pasan, construye la imagen y la sube a
+# ghcr.io (el registro de imagenes de GitHub).
+#
+# Hasta el 12/10/2026 esto era despliegue continuo a secas: publicaba la imagen
+# sin comprobar nada, igual que los otros siete repositorios de KO2. Los tests
+# existian y no los ejecutaba nadie desde que se escribieron.
 #
 # Estuvo apuntando a ECR (el registro de AWS) del 11 al 12/10/2026, mientras la
 # API vivio en una EC2 de Francfort. Al volver el destino a Hetzner, ECR deja de
@@ -17,7 +22,7 @@
 # publicada. El dia que se anada, ese mismo commit tiene que meter el
 # repositorio en REPOS_QUE_DESPLIEGAN del hook guard_push.py.
 
-name: Build and push
+name: Tests and push
 
 on:
   push:
@@ -41,7 +46,54 @@ env:
   IMAGEN: ghcr.io/ko2javier/pharma-back-py
 
 jobs:
+  # Los 195 tests, y el build NO empieza si alguno falla (lo ata el "needs" de
+  # abajo). Esto es lo que separa un despliegue continuo de un CI/CD de verdad:
+  # antes, un push rojo publicaba la imagen igual.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          # La MISMA version que el .venv local y que la imagen. Si aqui
+          # corriera 3.13 y en produccion 3.14, los tests estarian probando
+          # otro interprete.
+          python-version: '3.14'
+          cache: pip
+
+      - name: Instalar dependencias
+        # requirements-dev.txt arrastra con su "-r" las de produccion.
+        run: pip install -r requirements-dev.txt
+
+      - name: Ejecutar los tests
+        # VALORES DE PEGA, y hacen falta: conftest.py hace "from app.main import
+        # app", y eso construye Settings, que exige nueve variables SIN valor por
+        # defecto. En local las coge del .env; aqui no hay .env y sin esto la
+        # bateria ni arranca (comprobado: ValidationError antes del primer test).
+        #
+        # Que sean inventados no debilita la prueba: ningun test de los niveles
+        # 1 y 2 abre una conexion. SQLAlchemy construye el engine al importar
+        # pero es perezoso, y la sesion va siempre sustituida por un mock.
+        env:
+          PORT: 8001
+          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          DB_HOST: localhost
+          DB_PORT: 3306
+          DB_NAME: test
+          DB_USER: test
+          DB_PASSWORD: test
+          IA_SERVICE_URL: http://localhost:8000
+          IA_SERVICE_API_KEY: test
+          ENVIRONMENT: test
+        run: pytest -q
+
   build-and-push:
+    # Sin esto, los tests correrian EN PARALELO con el build y la imagen se
+    # publicaria igual aunque salieran rojos.
+    needs: tests
     runs-on: ubuntu-latest
 
     # packages: write es lo que deja publicar en ghcr.io; contents: read, lo que
