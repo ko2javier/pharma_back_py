@@ -1,91 +1,122 @@
-# pharma_back_py — EasyFarma API en FastAPI
+# pharma_back_py — EasyFarma API on FastAPI
 
-Réplica del backend **EasyFarma** (`farmacia-ko2-back`, Spring Boot 3 / Java 21) sobre
-**FastAPI totalmente async**. Es a la vez una migración y un proyecto de aprendizaje
-Java → Python: cada fichero se corresponde con su `.java` de origen.
+A full rewrite of the **EasyFarma** pharmacy backend (`farmacia-ko2-back`, Spring Boot 3 /
+Java 21) on **fully async FastAPI**. Same database, same 25 REST endpoints, same JSON
+contract — so the existing Angular frontend talks to it without a single change.
 
-> ⚠️ **Proyecto en construcción.** El esqueleto está completo, pero la mayoría de los
-> ficheros todavía están vacíos. Ver *Estado actual* más abajo.
+**It is live.** Since 2026-10-12 the production frontend at `pharma.ko2-oreilly.com` is
+served by this API, running on a Hetzner VPS behind Cloudflare. The Java backend stays up
+on its own subdomain as a rollback path.
+
+## Why
+
+The Java backend works. This is not a rescue project — it is a deliberate port, written to
+learn Python the way a working codebase forces you to: every file here maps to the `.java`
+file it replaces, and every deviation from the original is documented and justified rather
+than quietly introduced.
 
 ## Stack
 
-| Necesidad | Librería | Equivalente en Spring |
+| Concern | Library | Spring equivalent |
 |---|---|---|
-| Framework web | `fastapi` | `spring-boot-starter-web` |
-| Servidor ASGI | `uvicorn[standard]` | Tomcat embebido |
-| ORM async | `sqlalchemy[asyncio]` 2.x | Hibernate / Spring Data JPA |
-| Driver MySQL async | `aiomysql` | `mysql-connector-j` |
-| Validación / DTOs | `pydantic` v2 | Jakarta Validation + DTOs |
+| Web framework | `fastapi` 0.141 | `spring-boot-starter-web` |
+| ASGI server | `uvicorn[standard]` | embedded Tomcat |
+| Async ORM | `sqlalchemy[asyncio]` 2.0 | Hibernate / Spring Data JPA |
+| MySQL driver | `aiomysql` | `mysql-connector-j` |
+| Validation / DTOs | `pydantic` v2 | Jakarta Validation + DTOs |
 | JWT | `PyJWT` | `jjwt` |
-| Hash de contraseñas | `bcrypt` | `BCryptPasswordEncoder` |
-| Cliente HTTP async | `httpx` | `RestTemplate` / `WebClient` |
+| Password hashing | `bcrypt` | `BCryptPasswordEncoder` |
+| Async HTTP client | `httpx` | `RestTemplate` |
 
-Python 3.12.3. Versiones exactas fijadas en `requirements.txt`.
+Python 3.14. Every version pinned in `requirements.txt` — there is no
+`spring-boot-starter-parent` here to decide them for you.
 
-## Decisiones de diseño
+## Design decisions
 
-- **Async de principio a fin.** Una sola llamada bloqueante dentro de un `async def`
-  congela el *event loop* de toda la aplicación. Lo que no tenga versión async se
-  envuelve en `await asyncio.to_thread(...)` — `bcrypt` incluido.
-- **Pool limitado a 3 conexiones** (`pool_size=3, max_overflow=0`) para respetar la
-  cuota de Aiven, igual que `hikari.maximum-pool-size=3` en el Java.
-- **`models/` y `schemas/` separados**, aunque en Java conviven en `model/`.
-- **Sufijo de capa obligatorio en el nombre de cada fichero**: `user_model.py`,
-  `user_schema.py`, `user_repository.py`, `user_service.py`, `user_controller.py`.
-  Con tres `user.py` abiertos en el IDE no se distingue la capa. Sin sufijo solo:
-  `base.py`, `router.py`, `deps.py`, `core/*`, `exceptions/*`.
-- **`app/models/__init__.py` importa las 6 entidades.** SQLAlchemy no escanea el
-  classpath como Hibernate: una tabla no existe en `Base.metadata` si nadie la ha
-  importado. Es el "escáner de entidades" a mano.
-- Apunta a la **misma base de datos** que el backend Java. Los hashes BCrypt `$2a$`
-  de Spring los verifica la librería `bcrypt` de Python, así que no hay que migrar
-  contraseñas.
+- **Async all the way down.** One blocking call inside an `async def` freezes the event
+  loop for every request, not just its own. Anything without an async version is wrapped in
+  `asyncio.to_thread(...)` — `bcrypt` included: four hashes in a row block the loop for
+  **821 ms** called directly, **22 ms** through a thread. Spring never had this problem
+  because each request owned a Tomcat thread.
+- **The connection pool is capped at 3** (`pool_size=3, max_overflow=0`) to stay inside the
+  Aiven quota, mirroring `hikari.maximum-pool-size=3` in the Java.
+- **Same database, same passwords.** Spring's `$2a$` BCrypt hashes verify as-is with
+  Python's `bcrypt`, so no user had to reset anything.
+- **Stricter TLS than the original.** The Java connects to Aiven with
+  `verifyServerCertificate=false`; this API ships Aiven's CA certificate and verifies the
+  chain and the hostname.
+- **`models/` and `schemas/` are separate packages**, though Java keeps both in `model/`.
+- **Every file carries its layer as a suffix** — `user_model.py`, `user_schema.py`,
+  `user_repository.py`, `user_service.py`, `user_controller.py`. The idiomatic short form
+  (`schemas/user.py`) was rejected on purpose: three tabs named `user.py` are
+  indistinguishable in an editor.
+- **`app/models/__init__.py` imports all six entities by hand.** SQLAlchemy has no
+  classpath scan: a table that nobody imported does not exist in `Base.metadata`, and
+  Alembic would happily generate a migration dropping it.
 
-## Puesta en marcha
+## Running it locally
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt   # el -r arrastra requirements.txt
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
 
-cp .env.example .env                  # y rellenar los valores
-
-uvicorn app.main:app --reload
+cp .env.example .env               # then fill in the values
+python -m app.main
 ```
 
-Documentación interactiva en <http://localhost:8000/docs>.
+Interactive docs at <http://localhost:8001/docs>.
 
-**Ojo con `DB_URL`:** cambia de formato respecto a Java. Spring usa
-`jdbc:mysql://host:puerto/bd`; SQLAlchemy necesita
-`mysql+aiomysql://usuario:clave@host:puerto/bd`.
+Nine environment variables are required and **none has a default**: a missing one stops the
+app at startup naming the variable, instead of failing later with something cryptic.
 
-## Estado actual
+> **On Windows**, start it with `python -m app.main`, not the bare `uvicorn` command.
+> uvicorn 0.36+ picks the event loop through a factory and ignores
+> `set_event_loop_policy`; the Windows default (`ProactorEventLoop`) cannot do MySQL's
+> mid-connection TLS upgrade, and the failure surfaces as an unhelpful
+> `OSError [WinError 87]`. `app/main.py` pins `asyncio:SelectorEventLoop`, which is also
+> the Linux default, so it is one line for both systems.
 
-De los 14 pasos del plan (`ESTRUCTURA.md`, sección 7):
+## Tests
 
-| Paso | Qué | Estado |
-|---|---|---|
-| 1 | Esqueleto, dependencias y arranque | ✅ hecho y verificado |
-| 2 | `core/config.py`, `core/database.py` | ⬜ siguiente |
-| 3 | `models/` — 6 entidades + `base.py` | ✅ hecho y verificado |
-| 4 | `schemas/` — 7 ficheros, 14 clases Pydantic | ✅ hecho y verificado |
-| 5–14 | Seguridad, repositorios, servicios, controladores, tests | ⬜ pendiente |
+```bash
+pytest -q        # 195 tests, ~1.6 s, no network and no database
+```
 
-Los ficheros de las capas pendientes existen vacíos, con su nombre definitivo.
-`app/main.py` arranca y `/docs` responde; todavía no hay router registrado.
+Every external boundary is mocked: the test suite never opens a connection to Aiven, to
+AEMPS or to the AI service.
 
-## Documentación
+**The suite was tested against itself.** Five real bugs were injected one at a time — an
+auth gate removed from `/articulos`, `require_role` comparing against the wrong role
+prefix, a 24-hour token instead of 10, a SELLER allowed to create users, a 204 where the
+contract says 200 — and each one turned the suite red. A green suite that has never been
+shown to fail proves nothing.
 
-- **[`ESTRUCTURA.md`](ESTRUCTURA.md)** — el plan completo: árbol de carpetas anotado con
-  el `.java` de origen de cada fichero, tabla de equivalencias Spring → FastAPI, los 25
-  endpoints y los 14 pasos de construcción en orden. **Leer antes de tocar código.**
-- **[`.claude/memory/`](.claude/memory/)** — notas de contexto acumuladas durante la
-  migración: contrato JSON que debe respetar la API, decisiones tomadas y hallazgos ya
-  verificados que no merece la pena volver a investigar.
+## Deployment
 
-## Proyecto de origen
+```
+browser ──https──▶ Cloudflare ──https──▶ nginx (VPS) ──http──▶ container :8001
+```
 
-`farmacia-ko2-back` — Spring Boot 3, Java 21, MySQL en Aiven. Este repo replica sus 25
-endpoints REST y su modelo de datos; el contrato JSON que consume el frontend Angular se
-mantiene salvo las desviaciones deliberadas documentadas en
-`.claude/memory/fastapi_api_contract.md`.
+`.github/workflows/deploy.yml` runs the 195 tests and **only then** builds the image and
+pushes it to `ghcr.io`, tagged `latest` and with the commit SHA. A red test blocks the
+image: the build job declares `needs: tests`.
+
+The server pulls that image; it never builds. The `docker-compose.yml` here is the one
+running in production — it joins an external Docker network so the API can reach the AI
+microservice by container name.
+
+## Documentation
+
+- **[`ESTRUCTURA.md`](ESTRUCTURA.md)** — the full build log, in Spanish: the directory tree
+  annotated with the originating `.java` file, a Spring → FastAPI mapping table, all 25
+  endpoints, and the 14 construction steps with what each one taught. Read it before
+  touching the code.
+- **[`.env.example`](.env.example)** — the nine required variables.
+
+## Original project
+
+`farmacia-ko2-back` — Spring Boot 3, Java 21, MySQL on Aiven. This repository replicates
+its 25 REST endpoints and its data model. Where behaviour differs, it is deliberate and
+documented in `ESTRUCTURA.md` — for instance, AEMPS query parameters are URL-encoded here,
+where the Java concatenated them into the URL.
