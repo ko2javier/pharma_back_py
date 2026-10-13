@@ -80,11 +80,22 @@ app at startup naming the variable, instead of failing later with something cryp
 ## Tests
 
 ```bash
-pytest -q        # 195 tests, ~1.6 s, no network and no database
+pytest -q                 # 195 tests, ~1.6 s, no network and no database
+pytest -m integration     # against a real MySQL in Docker (Testcontainers), ~30 s
 ```
 
-Every external boundary is mocked: the test suite never opens a connection to Aiven, to
-AEMPS or to the AI service.
+Every external boundary is mocked in the default run: it never opens a connection to
+Aiven, to AEMPS or to the AI service.
+
+**Integration tests run against the real schema, not one generated from the models.** The
+database schema was created by hand (`ddl-auto=none` in the original Java backend), and the
+ORM models deliberately declare no foreign keys, so `create_all()` would build a database
+without the `ON DELETE CASCADE` rules that matter most. Instead, `tests/schema.sql` is the
+production DDL dumped with `SHOW CREATE TABLE`, loaded into a throwaway MySQL container.
+The suite runs twice — on **MySQL 8.0.45** (production today) and on **8.4** (the version
+the managed database is forced onto after 31 October 2026) — so the upgrade is tested
+before it happens. They are excluded from the default run with a pytest marker, so the
+fast suite and CI do not need Docker.
 
 **The suite was tested against itself.** Five real bugs were injected one at a time — an
 auth gate removed from `/articulos`, `require_role` comparing against the wrong role

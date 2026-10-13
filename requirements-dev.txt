@@ -9,6 +9,17 @@
 pytest==9.1.1
 pytest-asyncio==1.4.0
 
+# Nivel 3 de ESTRUCTURA §9: levanta un MySQL en Docker y le carga
+# tests/schema.sql (el esquema REAL de Aiven). Es el Testcontainers de Java,
+# mismo nombre y misma idea. Solo lo usan los tests de tests/integration,
+# que van fuera del "pytest" a secas (ver pytest.ini).
+#
+# El extra [mysql] no es decorativo: trae PyMySQL con 'cryptography'. Contra
+# el contenedor no hay TLS, y sin TLS el caching_sha2_password de MySQL 8
+# exige cifrar la password con RSA -- que es justo lo que en produccion NO
+# hace falta (requirements.txt), porque Aiven obliga a TLS.
+testcontainers[mysql]==4.15.0
+
 # RECORDATORIO para el paso 13: pytest-asyncio 1.x no ejecuta los tests
 # 'async def' por defecto. Hay que declarar el modo en pytest.ini o pyproject.toml:
 #

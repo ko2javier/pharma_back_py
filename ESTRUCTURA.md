@@ -513,7 +513,7 @@ Se construye de dentro hacia fuera: primero lo que no depende de nada.
 | 10 | Ventas y cancelaciones: `venta_repository.py`, `venta_cancelada_repository.py`, `venta_service.py`, `venta_cancelada_service.py`, `venta_controller.py`, `venta_cancelada_controller.py` + dos altas en `router.py` | **Hecho y verificado (2026-10-05):** 49 comprobaciones de nivel 2. Los 7 endpoints dan 401 sin token; `/ventas/all` no se lo come `/{username}`; 204 en los dos GET de ventas y `200 []` en `/cancelaciones`; 200 (no 201) al registrar; 404 (no 500) al cancelar una venta inexistente; 422 sin `?responsable=`; el log guarda el username del token y no el `responsable`; el `id` del cliente se ignora en `POST /cancelaciones` |
 | 11 | Activity log: `activity_log_controller.py` + alta en `router.py` con `require_role("SUPERADMIN")` | **Hecho y verificado (2026-10-04):** ruta en el OpenAPI con candado, 401 sin token, 403 con ADMIN y con SELLER, 200 con SUPERADMIN, `ipAddress` en camelCase, orden fecha/hora DESC, y `200 []` (no 204) con la lista vacía. Primer uso real de `require_role` |
 | 12 | AEMPS + IA: `cima_service.py`, `ia_service.py`, `cima_controller.py` + alta en `router.py`, `lifespan` en `main.py` y `get_http_client` en `deps.py` | **Hecho y verificado (2026-10-11):** 30 comprobaciones de nivel 2 más 14 contra AEMPS de verdad. Las 3 rutas dan 401 sin token; 200 con el JSON de AEMPS sin doble serializar; 200 vacío con `nregistro` inexistente (AEMPS da 204); 502 con AEMPS caído, timeout, conexión rechazada y respuesta no-JSON; 409/404 con clave `mensaje`; **500 y no 502 en los cuatro fallos de la IA** (401, 5xx, timeout, caída) y sin escribir el log; `IA_MATCH` con el username del token; `tamanioPagina` no se reenvía; un `&` en el nombre no cuela parámetros; el cliente compartido se crea y se cierra con el `lifespan` |
-| 13 | Tests: `pytest.ini` + `tests/` (13 ficheros) | **Hecho y verificado (2026-10-11):** **195 tests en verde en 1,6 s**, niveles 1 y 2, sin tocar Aiven. Y comprobado que la batería caza lo que dice cazar: cinco bugs reales inyectados de uno en uno (quitar el gate de `/articulos` de `router.py`, `require_role` con prefijo `ROLE_`, token de 24 h, el SELLER pudiendo crear usuarios, `/cancelaciones` devolviendo 204) la ponen roja los cinco. Detalle en §9 bis |
+| 13 | Tests: `pytest.ini` + `tests/` (13 ficheros) | **Hecho y verificado (2026-10-11):** **195 tests en verde en 1,6 s**, niveles 1 y 2, sin tocar Aiven. Y comprobado que la batería caza lo que dice cazar: cinco bugs reales inyectados de uno en uno (quitar el gate de `/articulos` de `router.py`, `require_role` con prefijo `ROLE_`, token de 24 h, el SELLER pudiendo crear usuarios, `/cancelaciones` devolviendo 204) la ponen roja los cinco. Detalle en §9 bis. **Nivel 3 empezado el 2026-10-13** (§9 ter): 3 tests × 2 versiones de MySQL con Testcontainers, fuera del `pytest` a secas |
 | 14 | Docker y despliegue | **Hecho el 2026-10-12:** `Dockerfile`, `.dockerignore`, `docker-compose.yml` y workflow de build. Desplegado en **AWS** (ECR + OIDC + EC2 con rol de instancia, Fráncfort), probado contra Aiven desde allí. Queda automatizar el despliegue y meter los tests en el workflow. Detalle en §11 |
 
 **Inventario de lo que falta, decisiones abiertas y trampas ya pagadas: §10.** Está escrito
@@ -770,8 +770,12 @@ Users.enabled tras SOLO flush     -> True     (default de Python)
 ```
 
 **Sigue haciendo falta cuando la columna la rellena el servidor** y Python no puede saberlo (un
-`DEFAULT CURRENT_TIMESTAMP`, un trigger): ahí el objeto se quedaría con `None`. En este
-proyecto no hay ninguna. Y no hay riesgo de que los atributos se vacíen tras el `commit()`
+`DEFAULT CURRENT_TIMESTAMP`, un trigger): ahí el objeto se quedaría con `None`. ~~En este
+proyecto no hay ninguna.~~ **Corregido el 2026-10-13: sí hay una**, `ventas_canceladas.fecha`
+es `datetime DEFAULT CURRENT_TIMESTAMP` en Aiven (visto en el `SHOW CREATE TABLE`, §9 ter). No
+muerde porque `cancelar_venta` pasa siempre `fecha=datetime.now()` y el modelo tiene además
+`default=datetime.now`, pero la afirmación era falsa: se hizo leyendo los modelos, no el
+esquema. Y no hay riesgo de que los atributos se vacíen tras el `commit()`
 porque `AsyncSessionLocal` va con `expire_on_commit=False` — con el defecto (`True`) un acceso
 posterior intentaría recargar y en async eso revienta con `MissingGreenlet`.
 
@@ -919,6 +923,7 @@ ASCII, así que divergiría de la collation `utf8mb4_..._ci` en nombres con acen
 
 **Los niveles 1 y 2 desde el primer día; el 3 sólo para la media docena de casos donde MySQL
 importa de verdad.** Se llegará al nivel 3 si da tiempo — no es requisito para cerrar el paso 13.
+**Empezado el 2026-10-13: ver §9 ter.**
 
 El nivel 2 ya se está usando de hecho en los scripts de verificación de los pasos 8 y 9:
 `app.dependency_overrides[get_current_user] = ...` es literalmente el `@MockBean` de Spring, y
@@ -962,8 +967,8 @@ ejecutaba solo sobre el `DataSource`.
 
 ## 9 bis. Los tests escritos (paso 13, cerrado el 2026-10-11)
 
-**195 tests, 13 ficheros, 1,6 s, ni una conexión a Aiven.** Niveles 1 y 2 del §9; el nivel 3
-(Testcontainers) sigue siendo opcional y no se ha hecho.
+**195 tests, 13 ficheros, 1,6 s, ni una conexión a Aiven.** Niveles 1 y 2 del §9. El nivel 3
+(Testcontainers) se empezó el 2026-10-13 y va aparte: §9 ter.
 
 | Fichero | Tests | Qué fija |
 |---|---|---|
@@ -1021,6 +1026,135 @@ Lo que se aprendió escribiéndolos, y no estaba en el §9:
 
 ---
 
+## 9 ter. El nivel 3: Testcontainers contra el esquema real (empezado el 2026-10-13)
+
+```bash
+pytest -m integration     # Docker arrancado; ~30 s: 3 tests x 2 versiones de MySQL
+pytest                    # los 195 de siempre; el nivel 3 sale como "6 deselected"
+```
+
+| Fichero | Qué es |
+|---|---|
+| `tests/schema.sql` | El esquema **real** de Aiven, sacado con `SHOW CREATE TABLE` el 13/10. Sólo DDL |
+| `tests/integration/conftest.py` | Contenedor por versión, carga del esquema, vaciado entre tests, sesión real |
+| `tests/integration/test_venta_cancelada_mysql.py` | Los 3 primeros tests (abajo) |
+| `pytest.ini` | marcador `integration` y `addopts = -m "not integration"` |
+| `requirements-dev.txt` | `testcontainers[mysql]==4.15.0` |
+
+### Por qué un `schema.sql` y no `Base.metadata.create_all()`
+
+Lo que ya decía el §9, ahora medido: los modelos no declaran ni una `ForeignKey`, así que un
+`create_all()` construye una base **sin** las tres cascadas. Con el esquema real cargado en un
+contenedor, comprobado en las dos versiones: borrar un artículo se lleva sus ventas, borrar un
+usuario se lleva sus ventas y su fila de `authorities`.
+
+**Si cambia el esquema de Aiven, hay que volver a volcarlo.** El fichero es una foto: nadie lo
+mantiene sincronizado solo.
+
+### Las dos versiones de MySQL
+
+Aiven corre **8.0.45** y pasa a **8.4** después del 31/10/2026, sin poder evitarlo. La
+batería entera corre en las dos (`params=` en la fixture `mysql`), así que esa subida queda
+probada antes de que ocurra — la prueba que el 10/10 no se pudo hacer porque el plan gratuito
+de Aiven no permite *fork*. Resultado a 13/10: **mismo comportamiento en las dos**, y el cambio
+de 8.4 que podía romper algo (claves ajenas a columnas no únicas) no aplica: las tres apuntan a
+`UNIQUE`.
+
+**Después del 31/10:** quitar `mysql:8.0.45` de `_IMAGENES` y cambiar `mysql:8.4` por la
+versión exacta que dé `SELECT VERSION()` en Aiven. `mysql:8.4` a secas es el último parche
+(8.4.11 el 13/10), no necesariamente el de producción.
+
+### Lo que el volcado enseñó: el modelo y la base no coinciden
+
+| Columna | En Aiven | En el modelo | Efecto |
+|---|---|---|---|
+| `ventas_canceladas.nombre_producto` | `varchar(255)` **NOT NULL** | `String(100)`, `Optional` | cancelar una venta con `nameproducto` NULL → `ERROR 1048` → **500** |
+| `ventas_canceladas.importe` | **`decimal(10,2)`** NOT NULL | `Double`, `Optional` | 25.905 se guarda como 25.91 |
+| `ventas_canceladas.fecha` | `DEFAULT CURRENT_TIMESTAMP` | sin default de servidor | el §7 decía que no había ninguna (corregido) |
+| `users.permiso` | `varchar(20)` DEFAULT `'SELLER'` | `String(50)` | un permiso de más de 20 caracteres no cabe |
+| `ventas.nameproducto`, `ventas.dnicliente` | admiten **NULL** | `Mapped[str]`; `VentaOut` los exige | una sola fila con NULL tumbaría `GET /ventas/all` entero con un 500 |
+
+**Comprobado en Aiven el 13/10:** `SELECT COUNT(*) FROM ventas WHERE nameproducto IS NULL OR
+dnicliente IS NULL` → **0**. Las dos últimas filas son un riesgo latente, no un fallo activo. Por
+la API de Python no puede entrar un NULL (`VentaCreate` exige los dos campos); por el Java, sin
+comprobar. Ninguna se ha arreglado: está en la bitácora.
+
+Menores, sin efecto: `authorities.id`, `ventas_canceladas.id` y `activity_log.id` son `bigint`
+(el modelo dice `Integer`) y `articulos.codigo` es `char(13)` (el modelo, `String(13)`).
+
+**Collation:** cuatro tablas en `utf8mb4_general_ci` y **dos en `utf8mb4_0900_ai_ci`**
+(`activity_log` y `ventas_canceladas`), leído de `information_schema.TABLES`. Las dos ignoran
+mayúsculas **y acentos**: medido, `LIKE '%nino%'` encuentra `Niño`.
+
+### Los tres tests
+
+Son de **caracterización**: fijan lo que la aplicación hace hoy, no lo que debería hacer.
+
+| Test | Qué fija |
+|---|---|
+| `test_cancelar_venta_sin_nombre_revienta_con_error_1048` | la causa: `IntegrityError` con código 1048 en `nombre_producto` |
+| `test_endpoint_cancelar_venta_sin_nombre_hoy_da_500_y_no_borra` | la consecuencia: 500, la venta sigue y no queda cancelación huérfana |
+| `test_endpoint_cancelar_venta_con_nombre_da_200` | el control: sin él, el 500 podría venir de cualquier otra cosa |
+
+**Probados contra sí mismos:** quitando el `NOT NULL` de `schema.sql`, los dos primeros se
+ponen rojos en las dos versiones (4 fallos) y el control sigue verde. El día que se decida qué
+hacer con una venta sin nombre, esos dos se pondrán rojos a propósito.
+
+### Trampas, todas pagadas el 13/10
+
+- **`ANSI_QUOTES`.** Aiven lo lleva en el `sql_mode`, y por eso su `SHOW CREATE TABLE` sale con
+  `"users"`. En un MySQL normal eso se lee como **cadena**: `ERROR 1064`. El `schema.sql` va con
+  backticks.
+- **El bucle de eventos.** `pytest-asyncio` en Windows crea un `ProactorEventLoop` (medido).
+  Se fuerza el Selector con el hook `pytest_asyncio_loop_factories`, **no** sobrescribiendo
+  `event_loop_policy`: eso está *deprecated* en pytest-asyncio 1.4 y
+  `WindowsSelectorEventLoopPolicy` desaparece en Python 3.16.
+- **`dialect="aiomysql"` rompe el arranque del contenedor.** Testcontainers usa esa URL con un
+  `create_engine()` **síncrono** para ver si MySQL está listo → `MissingGreenlet`. La URL async
+  se monta a mano.
+- **`seed=` va en carrera.** Testcontainers copia esos ficheros *después* de arrancar el
+  contenedor, compitiendo con el entrypoint de MySQL. El esquema se carga a mano con PyMySQL,
+  una vez listo.
+- **Ryuk falla en Docker Desktop** (`Port mapping ... port 8080 is not available`:
+  `DockerClient.port()` no reintenta, y el reintento de fuera choca con un 409). Apagado **sólo
+  en Windows**. Si se mata pytest a lo bruto, el MySQL se queda vivo:
+  `docker ps --filter "ancestor=mysql:8.4"`.
+- **Sin TLS, PyMySQL necesita `cryptography`** para el `caching_sha2_password` (cifra la
+  contraseña con RSA). Lo trae el extra `[mysql]`; en producción no hace falta porque Aiven va
+  por TLS.
+- **El cliente `mysql` del contenedor habla `latin1` por defecto.** Una prueba a mano con `ñ`
+  dio un falso "no encuentra": la `ñ` se había guardado rota. Con `--default-character-set=utf8mb4`,
+  bien. Antes de sacar conclusiones de la collation, mirar el `HEX()` de lo guardado.
+- **MySQL arranca dos veces** (un servidor temporal sin red para inicializar, y luego el de
+  verdad). Contar líneas `ready for connections` en los logs no sirve, porque también cuenta las
+  del X Plugin. Lo fiable es una conexión TCP. Testcontainers entra por TCP y no le afecta.
+
+### Diseño de las fixtures, y por qué
+
+- **Contenedor de ámbito de sesión** y fixture **síncrona**: arranca una vez por versión
+  (~12 s) y no choca con `asyncio_default_fixture_loop_scope = function`.
+- **Engine por test**, con `NullPool` y `dispose()` al final: un engine async queda atado al
+  bucle en el que abre conexiones, y cada test tiene el suyo.
+- **`TRUNCATE` antes de cada test** en vez de transacción con rollback: los services hacen
+  `commit()` de verdad, y el bloqueo optimista necesitará dos sesiones con datos confirmados.
+- **`sesion` se sobrescribe por nombre**: la de `tests/integration/conftest.py` tapa a la falsa
+  de `tests/conftest.py` sólo en esa carpeta (comprobado). La petición HTTP abre **su propia**
+  sesión, como el `get_db` real; si usara la del test, el test vería objetos en memoria y no lo
+  que quedó en MySQL.
+- **El marcador lo pone el `conftest`** (`pytest_collection_modifyitems` con `tryfirst=True`),
+  no cada fichero, para que un test nuevo no se cuele en el `pytest` a secas y tumbe la CI.
+
+### Lo que falta del nivel 3
+
+1. La cascada de `DELETE /articulos/{id}` por el endpoint (comprobada a mano en SQL, falta el test).
+2. El bloqueo optimista: dos sesiones sobre el mismo artículo, la segunda → `StaleDataError` → 409.
+3. La collation desde `find_by_nombre_containing`.
+4. Un job `integration` en `deploy.yml` (en `ubuntu-latest` hay Docker y Ryuk funciona).
+5. Decidir qué hacer con una venta sin `nameproducto` al cancelar: va con el rediseño de la
+   cancelación (reponer stock), en la bitácora.
+
+---
+
 ## 10. Pendientes — inventario y análisis ya hecho
 
 *Cerrado el 2026-09-28. **Esto está escrito para no repetir el mismo análisis tres veces**: si
@@ -1030,7 +1164,7 @@ volver a hacerlo.*
 **Estado en una línea:** *(2026-10-11)* **los 25 endpoints vivos** (`/auth` ×2 +
 `/articulos` ×7 + `/users` ×5 + `/ventas` ×5 + `/cancelaciones` ×2 + `/activity-log` ×1 +
 `/api/cima` ×3). **No queda código de negocio pendiente, y desde el 2026-10-11 tampoco tests**: 195 en verde
-(§9 bis). **El paso 14 se cerró el 2026-10-12**: la API corre en una EC2 de Fráncfort con la imagen bajada de ECR (§11). Lo que queda no es código: automatizar el despliegue, los tests en el workflow y el microservicio de IA.
+(§9 bis). **El paso 14 se cerró el 2026-10-12**: tras el ejercicio de AWS (§11, ya desmontado) la API corre en Hetzner con la imagen de `ghcr.io`, y el workflow ejecuta los 195 tests antes de publicarla. *(2026-10-13)* Nivel 3 empezado: 3 tests contra MySQL real en 8.0.45 y 8.4 (§9 ter). Lo que queda: más tests de nivel 3 y su job en la CI, automatizar el despliegue y el microservicio de IA.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
