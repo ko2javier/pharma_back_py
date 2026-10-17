@@ -18,11 +18,13 @@
 # autenticarse, hay que ponerlo publico a mano una vez (Packages -> package
 # settings -> change visibility).
 #
-# El despliegue en el servidor todavia NO esta aqui: esto solo deja la imagen
-# publicada. El dia que se anada, ese mismo commit tiene que meter el
-# repositorio en REPOS_QUE_DESPLIEGAN del hook guard_push.py.
+# Desde el 2026-10-18 tambien DESPLIEGA: el ultimo job entra por SSH en el VPS
+# y pone la imagen recien publicada en produccion. Un push a master llega a
+# produccion -- por eso el repo esta en REPOS_QUE_DESPLIEGAN de guard_push.py.
+# Hasta ese dia el despliegue era a mano: el workflow publicaba la imagen y
+# nadie avisaba al servidor.
 
-name: Tests and push
+name: Tests, push and deploy
 
 on:
   push:
@@ -200,3 +202,56 @@ jobs:
           echo "Imagen publicada:"
           echo "  ${{ env.IMAGEN }}:latest"
           echo "  ${{ env.IMAGEN }}:${{ github.sha }}"
+
+  # Pone en produccion la imagen que acaba de publicar build-and-push. Solo
+  # llega aqui si han pasado los 195 y los de integracion: deploy necesita a
+  # build-and-push, y build-and-push necesita a los dos.
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    # Dos push seguidos no despliegan a la vez: el segundo espera a que
+    # termine el primero, en vez de pisarle el contenedor a medias.
+    concurrency:
+      group: produccion
+      cancel-in-progress: false
+
+    steps:
+      - name: Desplegar en el VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          # Los mismos tres nombres que usan los demas repos del VPS. La llave
+          # es propia de este repo (comentario gha-pharma_back_py en el
+          # authorized_keys del servidor): se puede revocar sin tocar las otras.
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          # Se despliega por el SHA del commit y no por "latest": asi el
+          # contenedor dice exactamente que codigo esta corriendo, y volver
+          # atras es repetir esto con el SHA anterior:
+          #     cd ~/apps/pharma-py && IMAGE_TAG=<sha> docker compose up -d app
+          # El docker-compose.yml del servidor ya lee ${IMAGE_TAG:-latest}.
+          #
+          # Lo que esto NO toca: el docker-compose.yml y el .env del VPS. Si
+          # cambian, se siguen copiando a mano -- aqui solo cambia la imagen.
+          script: |
+            set -e
+            cd ~/apps/pharma-py
+            export IMAGE_TAG=${{ github.sha }}
+            docker compose pull app
+            docker compose up -d app
+
+            # Que el contenedor arranque no significa que la API responda. Se
+            # espera hasta 30 s a un 200; si no llega, el job sale ROJO y deja
+            # el final del log a la vista en Actions.
+            for i in $(seq 1 15); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5051/ || true)
+              if [ "$code" = "200" ]; then
+                echo "Desplegado: responde 200 con la imagen $IMAGE_TAG"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "La API no responde 200 en 30 s tras desplegar $IMAGE_TAG"
+            docker compose logs --tail 40 app
+            exit 1

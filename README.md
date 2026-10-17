@@ -109,13 +109,30 @@ shown to fail proves nothing.
 browser ──https──▶ Cloudflare ──https──▶ nginx (VPS) ──http──▶ container :8001
 ```
 
-`.github/workflows/deploy.yml` runs the 195 tests and **only then** builds the image and
-pushes it to `ghcr.io`, tagged `latest` and with the commit SHA. A red test blocks the
-image: the build job declares `needs: tests`.
+Every push to `master` goes to production through `.github/workflows/deploy.yml`, and
+nothing reaches the server without passing both test suites:
 
-The server pulls that image; it never builds. The `docker-compose.yml` here is the one
+```
+push ──┬──▶ tests         195 unit and contract tests, mocked database
+       └──▶ integration   real MySQL 8.0 and 8.4 via Testcontainers
+                 │  both must pass
+                 ▼
+            build-and-push   image to ghcr.io, tagged `latest` and the commit SHA
+                 │
+                 ▼
+            deploy           SSH into the VPS, pull that SHA, restart, wait for a 200
+```
+
+The two test jobs run in parallel, so the pipeline waits for the slower one rather than
+for both. The deploy uses the commit SHA, not `latest`, so the running container always
+says exactly which code it is — and rolling back is the same command with the previous SHA.
+If the API does not answer 200 within 30 seconds of the restart, the job fails and prints
+the container's last log lines.
+
+The server pulls the image; it never builds. The `docker-compose.yml` here is the one
 running in production — it joins an external Docker network so the API can reach the AI
-microservice by container name.
+microservice by container name. Changes to that file or to the server's `.env` are still
+applied by hand: the pipeline only swaps the image.
 
 ## Documentation
 
