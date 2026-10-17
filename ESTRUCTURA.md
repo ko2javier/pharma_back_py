@@ -1146,10 +1146,10 @@ hacer con una venta sin nombre, esos dos se pondrán rojos a propósito.
 
 ### Lo que falta del nivel 3
 
-1. La cascada de `DELETE /articulos/{id}` por el endpoint (comprobada a mano en SQL, falta el test).
+1. ~~La cascada de `DELETE /articulos/{id}` por el endpoint~~ — **hecho el 2026-10-17**, `tests/integration/test_articulo_cascada_mysql.py` (3 tests). Validado inyectando el fallo: sin el `ON DELETE CASCADE` del `schema.sql` el `DELETE` ni siquiera se ejecuta (error 1451 de MySQL).
 2. El bloqueo optimista: dos sesiones sobre el mismo artículo, la segunda → `StaleDataError` → 409.
 3. La collation desde `find_by_nombre_containing`.
-4. Un job `integration` en `deploy.yml` (en `ubuntu-latest` hay Docker y Ryuk funciona).
+4. ~~Un job `integration` en `deploy.yml`~~ — **hecho el 2026-10-18**. Corre en paralelo con `tests` y el build necesita a los dos (`needs: [tests, integration]`). El primer intento salio rojo: el hook `pytest_asyncio_loop_factories` devolvia `None` en Linux y pytest-asyncio no lo admite (`d1a0d17`); ahora devuelve siempre el `SelectorEventLoop`.
 5. Decidir qué hacer con una venta sin `nameproducto` al cancelar: va con el rediseño de la
    cancelación (reponer stock), en la bitácora.
 
@@ -1164,7 +1164,7 @@ volver a hacerlo.*
 **Estado en una línea:** *(2026-10-11)* **los 25 endpoints vivos** (`/auth` ×2 +
 `/articulos` ×7 + `/users` ×5 + `/ventas` ×5 + `/cancelaciones` ×2 + `/activity-log` ×1 +
 `/api/cima` ×3). **No queda código de negocio pendiente, y desde el 2026-10-11 tampoco tests**: 195 en verde
-(§9 bis). **El paso 14 se cerró el 2026-10-12**: tras el ejercicio de AWS (§11, ya desmontado) la API corre en Hetzner con la imagen de `ghcr.io`, y el workflow ejecuta los 195 tests antes de publicarla. *(2026-10-13)* Nivel 3 empezado: 3 tests contra MySQL real en 8.0.45 y 8.4 (§9 ter). Lo que queda: más tests de nivel 3 y su job en la CI, automatizar el despliegue y el microservicio de IA.
+(§9 bis). **El paso 14 se cerró el 2026-10-12**: tras el ejercicio de AWS (§11, ya desmontado) la API corre en Hetzner con la imagen de `ghcr.io`, y el workflow ejecuta los 195 tests antes de publicarla. *(2026-10-13)* Nivel 3 empezado: 3 tests contra MySQL real en 8.0.45 y 8.4 (§9 ter). *(2026-10-18)* El despliegue es automatico (job `deploy` por SSH, por SHA del commit) y el nivel 3 corre en la CI. Lo que queda: dos tests de nivel 3 (bloqueo optimista y collation), el soft delete de articulos y el microservicio de IA.
 
 | Paso | Qué falta | Ficheros vacíos |
 |---|---|---|
