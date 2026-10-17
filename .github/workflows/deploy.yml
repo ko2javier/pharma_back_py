@@ -90,10 +90,57 @@ jobs:
           ENVIRONMENT: test
         run: pytest -q
 
+  # Nivel 3 (ESTRUCTURA 9 ter): los mismos tests que en local, contra un MySQL
+  # de verdad levantado por Testcontainers. Lo que aqui se caza no lo puede ver
+  # el job de arriba: las cascadas de las claves ajenas, los NOT NULL y la
+  # collation solo existen si hay una base de datos aplicandolos.
+  #
+  # Va EN PARALELO con "tests", no detras: el reloj cuenta el mas lento de los
+  # dos y no la suma. Los dos bloquean la imagen (ver el "needs" de
+  # build-and-push).
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Ejecutar los tests de integracion
+        # Las mismas variables de pega que el job de arriba, y por el mismo
+        # motivo: importar app.main construye Settings. Aqui ADEMAS son
+        # inofensivas porque la sesion la sustituye la fixture de
+        # tests/integration/conftest.py, que apunta al contenedor -- estas
+        # credenciales no llegan a usarse para conectar con nada.
+        #
+        # Ryuk (el contenedor de limpieza de testcontainers) se queda ENCENDIDO:
+        # solo esta apagado en Windows, donde fallaba al arrancar. Aqui es Linux
+        # y funciona, asi que no hay que tocar nada.
+        env:
+          PORT: 8001
+          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          DB_HOST: localhost
+          DB_PORT: 3306
+          DB_NAME: test
+          DB_USER: test
+          DB_PASSWORD: test
+          IA_SERVICE_URL: http://localhost:8000
+          IA_SERVICE_API_KEY: test
+          ENVIRONMENT: test
+        run: pytest -m integration -q
+
   build-and-push:
     # Sin esto, los tests correrian EN PARALELO con el build y la imagen se
-    # publicaria igual aunque salieran rojos.
-    needs: tests
+    # publicaria igual aunque salieran rojos. Son los dos jobs: los 195 con
+    # mocks y los de integracion contra MySQL real.
+    needs: [tests, integration]
     runs-on: ubuntu-latest
 
     # packages: write es lo que deja publicar en ghcr.io; contents: read, lo que
