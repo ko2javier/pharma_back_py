@@ -88,7 +88,7 @@ def pytest_collection_modifyitems(config, items):
 # 1. El bucle de eventos: el mismo que en produccion
 # -------------------------------------------------------------------------
 def pytest_asyncio_loop_factories(config, item):
-    """SelectorEventLoop en Windows, para los tests de esta carpeta.
+    """SelectorEventLoop para los tests de esta carpeta, en cualquier sistema.
 
     Medido: pytest-asyncio en Windows crea un ProactorEventLoop. Es el bucle
     con el que aiomysql + TLS revienta contra Aiven (OperationalError 2003 /
@@ -98,12 +98,28 @@ def pytest_asyncio_loop_factories(config, item):
 
     Se hace con este hook y NO sobrescribiendo la fixture event_loop_policy:
     eso pytest-asyncio 1.4 ya lo marca como deprecated, y
-    WindowsSelectorEventLoopPolicy desaparece en Python 3.16. En Linux (la
-    CI) devuelve None: alli el bucle por defecto ya es el Selector.
+    WindowsSelectorEventLoopPolicy desaparece en Python 3.16.
+
+    INCORRECTO (lo que habia hasta el 2026-10-17, y tumbo el estreno del job
+    de integracion en la CI):
+        if sys.platform == "win32":
+            return {"selector": asyncio.SelectorEventLoop}
+        return None
+    La idea era "en Linux ya es el Selector por defecto, asi que no toco
+    nada". Pero el contrato del hook no admite None: en cuanto ESTA
+    implementado tiene que devolver un mapa no vacio, y si no,
+    _collect_hook_loop_factories (plugin.py:262) corta la recogida entera con
+        pytest.UsageError: pytest_asyncio_loop_factories must return a
+        non-empty mapping of factory names to callables.
+    En Windows nunca se vio, porque alli se entraba siempre por el if.
+
+    Sin condicional es ademas mas honesto, porque asyncio.SelectorEventLoop ya
+    resuelve a la clase correcta en cada sistema (comprobado en los dos):
+        Windows -> _WindowsSelectorEventLoop   (el defecto seria Proactor)
+        Linux   -> _UnixSelectorEventLoop      (que YA es el defecto)
+    Asi que en Linux esto no cambia de bucle, solo cumple el contrato.
     """
-    if sys.platform == "win32":
-        return {"selector": asyncio.SelectorEventLoop}
-    return None
+    return {"selector": asyncio.SelectorEventLoop}
 
 
 # -------------------------------------------------------------------------
