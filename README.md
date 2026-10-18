@@ -80,7 +80,7 @@ app at startup naming the variable, instead of failing later with something cryp
 ## Tests
 
 ```bash
-pytest -q                 # 195 tests, ~1.6 s, no network and no database
+pytest -q                 # 200 tests, ~2 s, no network and no database
 pytest -m integration     # against a real MySQL in Docker (Testcontainers), ~30 s
 ```
 
@@ -113,7 +113,7 @@ Every push to `master` goes to production through `.github/workflows/deploy.yml`
 nothing reaches the server without passing both test suites:
 
 ```
-push ──┬──▶ tests         195 unit and contract tests, mocked database
+push ──┬──▶ tests         200 unit and contract tests, mocked database
        └──▶ integration   real MySQL 8.0 and 8.4 via Testcontainers
                  │  both must pass
                  ▼
@@ -147,4 +147,12 @@ applied by hand: the pipeline only swaps the image.
 `farmacia-ko2-back` — Spring Boot 3, Java 21, MySQL on Aiven. This repository replicates
 its 25 REST endpoints and its data model. Where behaviour differs, it is deliberate and
 documented in `ESTRUCTURA.md` — for instance, AEMPS query parameters are URL-encoded here,
-where the Java concatenated them into the URL.
+where the Java concatenated them into the URL. The two that change what the data looks like:
+
+- **Deleting a product is a soft delete.** The Java issued a real `DELETE`, and an
+  `ON DELETE CASCADE` foreign key silently took the product's whole sales history with it.
+  Here the product is flagged `enabled = false`: it disappears from every listing, its sales
+  stay. Users already worked this way.
+- **Cancelling a sale returns the units to stock**, in the same transaction that records the
+  cancellation — also for a product that has since been retired. The Java recorded the
+  cancellation and left the stock untouched.

@@ -224,6 +224,7 @@ def construir_articulo(
     version: int = 0,
     aemps_code: str | None = "67031",
     laboratorio: str | None = "Kern Pharma",
+    enabled: bool = True,
 ) -> Articulos:
     a = Articulos()
     a.id = id
@@ -235,6 +236,7 @@ def construir_articulo(
     a.version = version
     a.aemps_code = aemps_code
     a.laboratorio = laboratorio
+    a.enabled = enabled
     return a
 
 

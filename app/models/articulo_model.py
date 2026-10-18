@@ -1,6 +1,6 @@
 # app/models/articulo_model.py
 from typing import Optional
-from sqlalchemy import Float, Integer, String, Double
+from sqlalchemy import Boolean, Float, Integer, String, Double
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -27,6 +27,13 @@ class Articulos(Base):
     # Campos opcionales (nulables)
     aemps_code: Mapped[Optional[str]] = mapped_column(String(10))
     laboratorio: Mapped[Optional[str]] = mapped_column(String(100))
+
+    # Borrado logico, como users.enabled (user_model.py:19). Un DELETE fisico
+    # se llevaba las ventas por fk_articulos_ventas (ON DELETE CASCADE); con
+    # enabled=False el articulo deja de verse y su historial se queda.
+    # Columna anadida a mano en Aiven el 2026-10-18 (ddl-auto=none: nadie la
+    # crea solo). Mapped[bool] -> NOT NULL, igual que en la BD.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Habilita el bloqueo optimista que tenías con @Version en Spring
     __mapper_args__ = {"version_id_col": version}

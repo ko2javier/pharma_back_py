@@ -129,17 +129,21 @@ async def eliminar_articulo(
         session: AsyncSession = Depends(get_db),
         current_user: Users = Depends(get_current_user)
 ):
-    # OJO — BORRADO FÍSICO Y SE LLEVA EL HISTORIAL DE VENTAS POR DELANTE.
+    # BORRADO LÓGICO desde el 2026-10-18: el servicio pone enabled=False.
     #
-    # Comprobado en Aiven el 2026-09-28 (information_schema):
+    # Antes era un DELETE físico, y se llevaba el historial de ventas:
     #     fk_articulos_ventas   ventas.codigo -> articulos.codigo   DELETE RULE: CASCADE
+    # (comprobado en Aiven el 2026-09-28, information_schema). La FK sigue
+    # ahí; lo que cambia es que ya no se manda ningún DELETE que la dispare.
+    # Se pudo hacer al apagarse el Java, que compartía la BD: la columna
+    # 'enabled' se añadió a mano en Aiven (ddl-auto=none).
     #
-    # Es el mismo caso que saltó con usuarios en el paso 6, donde se pasó a
-    # borrado lógico (enabled=False) justo por esto. Aquí NO se ha cambiado: el
-    # Java hace este mismo DELETE, y 'articulos' no tiene columna 'enabled' —
-    # añadirla es un cambio manual de esquema (ddl-auto=none) en la BD que
-    # comparte con el backend Java en producción. Decisión pendiente, no un
-    # descuido.
+    # DESVIACIÓN DELIBERADA respecto al Java, que sí borra la fila. Al
+    # Angular le da igual: sigue recibiendo un 204 y el artículo desaparece
+    # de /All.
+    #
+    # get_by_id ya filtra los retirados: si el artículo ya estaba retirado,
+    # aquí sale None y el servicio lanza el 404 antes de llegar al log.
     articulo = await ArticuloService.get_by_id(session, id)
     nombre = articulo.nombre if articulo else f"id={id}"
 
@@ -165,11 +169,5 @@ async def vincular_aemps(
         body: ArticuloAempsLink,  # Usamos el DTO que creamos en lugar del Map genérico
         session: AsyncSession = Depends(get_db)
 ):
-    # OBSOLETO:
-    #     try:
-    #         ...
-    #     except ValueError as e:
-    #         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    #
-    # Pydantic nos garantiza que body.aemps_code existe y es del tipo correcto
+
     return await ArticuloService.link_aemps(session, id, body.aemps_code, body.laboratorio)

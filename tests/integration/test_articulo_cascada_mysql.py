@@ -1,30 +1,24 @@
 # tests/integration/test_articulo_cascada_mysql.py
 #
 # Segundo test del nivel 3, y el punto 1 de "lo que falta" de ESTRUCTURA
-# §9 ter. Fija la cascada que se comprobo a mano en SQL en septiembre
-# (information_schema de Aiven, citado en articulo_controller.py:132-142):
+# §9 ter. Nacio el 2026-10-17 fijando la cascada que se comprobo a mano en
+# SQL en septiembre (information_schema de Aiven):
 #
 #     ventas.codigo -> articulos.codigo    ON DELETE CASCADE
-#     (tests/schema.sql:77, constraint fk_articulos_ventas)
+#     (tests/schema.sql:78, constraint fk_articulos_ventas)
 #
-# Borrar un articulo se lleva por delante TODAS sus ventas. Es borrado
-# fisico y lo hace MySQL, no el codigo:
+# REESCRITO el 2026-10-18, con el borrado logico. La FK sigue en el esquema
+# -- un DELETE fisico seguiria llevandose todas las ventas del articulo --,
+# pero DELETE /articulos/{id} ya no manda ningun DELETE: pone enabled=False.
+# Lo que estos tests fijan ahora es lo contrario de lo que fijaban ayer: el
+# historial SOBREVIVE.
 #
-#   * Articulos (app/models/articulo_model.py) no declara ningun
-#     ForeignKey ni relationship().
-#   * Articulos.java tampoco tiene @OneToMany ni cascade=.
-#
-# O sea que ni SQLAlchemy ni Hibernate saben que esto pasa. El DELETE que
-# sale de ArticuloRepository.delete_by_id (app/repositories/
-# articulo_repository.py:69-73) es un DELETE de UNA fila de articulos; las
-# ventas desaparecen en el servidor, sin que el ORM se entere.
-#
-# POR ESO ESTE TEST SOLO PUEDE VIVIR AQUI. Con la sesion falsa de
-# tests/conftest.py no hay base de datos que aplique la FK, y con un
-# Base.metadata.create_all() el esquema no tendria la constraint (los
-# modelos no la declaran): en los dos casos el test pasaria en verde
-# habiendo probado NADA. Necesita el schema.sql real. Es el mismo
-# razonamiento de ESTRUCTURA §9 ter "Por que un schema.sql y no create_all".
+# Por que siguen en el nivel 3 y no en los 195: que la venta sobreviva solo
+# lo puede decir una base con la FK de verdad. Con la sesion falsa de
+# tests/conftest.py no hay FK que dispare, y con un create_all() tampoco
+# (los modelos no la declaran): el test pasaria en verde tanto con el
+# borrado logico como con el fisico. Es el razonamiento de ESTRUCTURA §9 ter
+# "Por que un schema.sql y no create_all".
 from datetime import date, time
 
 import pytest
@@ -32,11 +26,13 @@ from sqlalchemy import func, select
 
 from app.models.articulo_model import Articulos
 from app.models.user_model import Users
+from app.repositories.articulo_repository import ArticuloRepository
+from app.services.articulo_service import ArticuloService
 from app.models.venta_cancelada_model import CancellationStatus, VentaCancelada
 from app.models.venta_model import Ventas
 
-# Dos articulos distintos. El segundo es el CONTROL: si la cascada se
-# llevara tambien sus ventas, no seria una cascada, seria un TRUNCATE.
+# Dos articulos distintos. El segundo es el CONTROL: retirar uno no puede
+# afectar al otro.
 CODIGO_BORRADO = "8470001111111"
 CODIGO_INTACTO = "8470002222222"
 
@@ -52,8 +48,8 @@ async def _preparar(sesion) -> dict[str, int]:
 
     El commit() del final no es decorativo: MySQL va en REPEATABLE READ, y
     si la sesion del test se quedara dentro de una transaccion abierta,
-    seguiria viendo la foto de ANTES del DELETE que hace la peticion -- y
-    el test afirmaria que la cascada no ocurrio. Con el commit, la primera
+    seguiria viendo la foto de ANTES de la peticion -- y el test
+    afirmaria que el articulo sigue activo. Con el commit, la primera
     lectura de despues abre transaccion nueva y ve lo que hay de verdad.
     """
     sesion.add(Users(username="tester", password="x", enabled=True, permiso="ADMIN"))
@@ -80,9 +76,8 @@ async def _preparar(sesion) -> dict[str, int]:
     ])
 
     # ventas_canceladas no tiene ni FK ni columna 'codigo'
-    # (tests/schema.sql:81-90): es una tabla de auditoria suelta. Si la
-    # cascada la tocara, se estaria borrando el historial de cancelaciones
-    # al retirar un producto del catalogo.
+    # (tests/schema.sql:82-91): es una tabla de auditoria suelta. Ni con el
+    # DELETE fisico la tocaba la cascada.
     sesion.add(VentaCancelada(nombre_producto="Ibuprofeno 600mg", cantidad=3,
                               importe=38.85, responsable="admin",
                               status=CancellationStatus.CANCELLED))
@@ -98,10 +93,18 @@ async def _codigos_de_ventas(sesion) -> list[str]:
     return list((await sesion.execute(select(Ventas.codigo).order_by(Ventas.id))).scalars())
 
 
+async def _enabled_de(sesion, articulo_id: int) -> bool:
+    """Lee la columna, no el objeto: el de la sesion del test es la foto de
+    _preparar, y la peticion modifico OTRA sesion."""
+    return (await sesion.execute(
+        select(Articulos.enabled).where(Articulos.id == articulo_id)
+    )).scalar_one()
+
+
 # -------------------------------------------------------------------------
-# La cascada: borrar el articulo se lleva SUS ventas, y solo las suyas
+# Retirar un articulo: desaparece, pero su fila y sus ventas se quedan
 # -------------------------------------------------------------------------
-async def test_borrar_articulo_arrastra_sus_ventas(client, autenticar, sesion):
+async def test_retirar_articulo_conserva_sus_ventas(client, autenticar, sesion):
     ids = await _preparar(sesion)
     autenticar()
 
@@ -110,23 +113,18 @@ async def test_borrar_articulo_arrastra_sus_ventas(client, autenticar, sesion):
     assert r.status_code == 204
     assert r.content == b""  # 204 sin cuerpo, como ResponseEntity.noContent()
 
-    # Antes habia 3 ventas; quedan las del articulo que NO se borro.
-    # Esto es lo que ningun mock puede decir: el DELETE que mando
-    # SQLAlchemy afectaba a una fila de 'articulos'.
-    assert await _contar(sesion, Ventas) == 1
-    assert await _codigos_de_ventas(sesion) == [CODIGO_INTACTO]
-    assert await _contar(sesion, Articulos) == 1
+    # Ayer, con el DELETE fisico, aqui quedaban 1 venta y 1 articulo.
+    assert await _contar(sesion, Ventas) == 3
+    assert await _codigos_de_ventas(sesion) == [CODIGO_BORRADO, CODIGO_BORRADO, CODIGO_INTACTO]
+    assert await _contar(sesion, Articulos) == 2
+    assert await _enabled_de(sesion, ids["a"]) is False
+    assert await _enabled_de(sesion, ids["b"]) is True
 
 
-# -------------------------------------------------------------------------
-# El limite de la cascada: ventas_canceladas no se entera
-# -------------------------------------------------------------------------
-async def test_borrar_articulo_no_toca_ventas_canceladas(client, autenticar, sesion):
-    """Las dos tablas se llaman casi igual y hacen lo contrario ante el
-    mismo DELETE. 'ventas' cuelga de articulos.codigo y cae; 'ventas_
-    canceladas' guarda el nombre del producto como texto suelto y sobrevive.
-    Es justo lo que se quiere de un registro de auditoria: retirar un
-    producto del catalogo no puede borrar el rastro de sus cancelaciones."""
+async def test_retirar_articulo_no_toca_ventas_canceladas(client, autenticar, sesion):
+    """Las cancelaciones guardan el nombre del producto como texto suelto,
+    sin FK. Retirar un producto del catalogo no puede borrar el rastro de sus
+    cancelaciones -- ni ahora ni con el DELETE fisico de antes."""
     ids = await _preparar(sesion)
     autenticar()
 
@@ -138,23 +136,77 @@ async def test_borrar_articulo_no_toca_ventas_canceladas(client, autenticar, ses
     assert cancelacion.nombre_producto == "Ibuprofeno 600mg"
 
 
+async def test_el_retirado_desaparece_de_all(client, autenticar, sesion):
+    """La decision del 2026-10-18: todos los GET devuelven solo los activos.
+    Es lo que hace que desaparezca del almacen del Angular, que solo lee
+    /All."""
+    ids = await _preparar(sesion)
+    autenticar()
+
+    await client.delete(f"/articulos/{ids['a']}")
+    r = await client.get("/articulos/All")
+
+    assert r.status_code == 200
+    assert [a["codigo"] for a in r.json()] == [CODIGO_INTACTO]
+
+
+async def test_retirar_dos_veces_da_404_y_no_duplica_el_log(client, autenticar, sesion, log):
+    """'log' es el espia de tests/conftest.py:110, autouse tambien aqui: en
+    los tests ActivityLogService.log nunca escribe en activity_log. Por eso se
+    le pregunta al espia y no a la tabla, que siempre esta vacia."""
+    ids = await _preparar(sesion)
+    autenticar()
+
+    primera = await client.delete(f"/articulos/{ids['a']}")
+    segunda = await client.delete(f"/articulos/{ids['a']}")
+
+    assert primera.status_code == 204
+    assert segunda.status_code == 404
+    # Una sola llamada: la segunda peticion corta en el 404 antes del log.
+    log.assert_awaited_once()
+    assert log.await_args.args[2] == "DELETE_PRODUCT"
+
+
+# -------------------------------------------------------------------------
+# Lo que solo se ve con la UNIQUE KEY de verdad
+# -------------------------------------------------------------------------
+async def test_el_codigo_de_un_retirado_sigue_ocupado(client, autenticar, sesion):
+    """El bug de unicidad. find_by_codigo ya no ve el retirado, pero la UNIQUE
+    KEY codigo_unico si: si el generador se fiara de find_by_codigo, el
+    INSERT moriria con IntegrityError. codigo_en_uso tiene que decir True."""
+    ids = await _preparar(sesion)
+    autenticar()
+    await client.delete(f"/articulos/{ids['a']}")
+
+    assert await ArticuloRepository.find_by_codigo(sesion, CODIGO_BORRADO) is None
+    assert await ArticuloRepository.codigo_en_uso(sesion, CODIGO_BORRADO) is True
+
+
+async def test_un_nombre_retirado_se_puede_volver_a_dar_de_alta(client, autenticar, sesion):
+    """search_by_keyword es lo que usa el 409 "El producto ya existe en el
+    inventario" de /cima/validar (cima_controller.py:84). Si viera al
+    retirado, el producto no se podria volver a dar de alta nunca. No se
+    prueba por HTTP porque /cima/validar llama a AEMPS y a la IA."""
+    ids = await _preparar(sesion)
+    autenticar()
+    await client.delete(f"/articulos/{ids['a']}")
+
+    assert await ArticuloService.search_by_keyword(sesion, "Ibuprofeno") == []
+
+
 # -------------------------------------------------------------------------
 # El contrato del Python (404), que NO es el del Java (500)
 # -------------------------------------------------------------------------
-async def test_borrar_articulo_inexistente_da_404_y_no_borra_nada(client, autenticar, sesion):
+async def test_borrar_articulo_inexistente_da_404_y_no_toca_nada(client, autenticar, sesion):
     """Divergencia deliberada del paso 8, no un descuido.
 
     El Java lanza un RuntimeException pelado (ArticuloService.java:96) que
     acaba en el @ExceptionHandler(Exception.class) generico de
     GlobalExceptionHandler.java:38 -> 500 con {"error": "Error interno del
     servidor"}. El Python lanza ResourceNotFoundException
-    (app/services/articulo_service.py:119) y app/exceptions/handlers.py:31
-    la traduce a 404. Se fija el 404: replicar el 500 seria reintroducir el
-    fallo a proposito.
-
-    El 'no borra nada' es lo que justifica que este test este en el nivel 3
-    y no entre los 195: comprueba que el exists_by_id del service corta
-    ANTES de mandar ningun DELETE a MySQL."""
+    (app/services/articulo_service.py, delete_articulo_by_id) y
+    app/exceptions/handlers.py:31 la traduce a 404. Se fija el 404:
+    replicar el 500 seria reintroducir el fallo a proposito."""
     await _preparar(sesion)
     autenticar()
 

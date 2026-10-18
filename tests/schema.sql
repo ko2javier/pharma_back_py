@@ -57,6 +57,7 @@ CREATE TABLE `articulos` (
   `aemps_code` varchar(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
   `laboratorio` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,
   `version` int NOT NULL DEFAULT '0',
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
   PRIMARY KEY (`id`),
   UNIQUE KEY `codigo_unico` (`codigo`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

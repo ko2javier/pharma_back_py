@@ -16,6 +16,11 @@
 # 409, prohibir el NULL en ventas) esta sin decidir. El dia que se arregle,
 # los dos primeros se ponen rojos -- y eso es lo que se busca: que el cambio
 # no pase sin que nadie lo vea.
+#
+# AMPLIADO el 2026-10-18: cancelar devuelve al stock lo vendido. El 500 de la
+# venta sin nombre resulta ser la prueba de atomicidad que hacia falta: el
+# fallo llega DESPUES de sumar el stock, en el INSERT de la cancelacion, asi
+# que si el stock quedara subido, la transaccion estaria partida.
 from datetime import date, time
 
 import pytest
@@ -29,9 +34,11 @@ from app.models.venta_model import Ventas
 from app.services.venta_service import VentaService
 
 CODIGO = "8470001234567"
+STOCK_INICIAL = 50
+VENDIDAS = 2
 
 
-async def _preparar_venta(sesion, nameproducto: str | None) -> int:
+async def _preparar_venta(sesion, nameproducto: str | None, enabled: bool = True) -> int:
     """Una venta confirmada en MySQL, con su usuario y su articulo.
 
     El usuario y el articulo no son relleno: fk_usuario_ventas y
@@ -41,11 +48,12 @@ async def _preparar_venta(sesion, nameproducto: str | None) -> int:
     """
     sesion.add(Users(username="tester", password="x", enabled=True, permiso="ADMIN"))
     sesion.add(Articulos(nombre="Ibuprofeno 600mg", categoria="Antiinflamatorio",
-                         precio=12.95, cantidad=50, codigo=CODIGO))
+                         precio=12.95, cantidad=STOCK_INICIAL, codigo=CODIGO,
+                         enabled=enabled))
     await sesion.flush()
     venta = Ventas(fecha=date(2026, 10, 13), hora=time(13, 45), username="tester",
                    dnicliente="12345678A", nameproducto=nameproducto,
-                   cantidad=2, importe=25.90, codigo=CODIGO)
+                   cantidad=VENDIDAS, importe=25.90, codigo=CODIGO)
     sesion.add(venta)
     await sesion.commit()
     return venta.id
@@ -53,6 +61,16 @@ async def _preparar_venta(sesion, nameproducto: str | None) -> int:
 
 async def _contar(sesion, modelo) -> int:
     return (await sesion.execute(select(func.count()).select_from(modelo))).scalar_one()
+
+
+async def _articulo(sesion) -> tuple[int, bool]:
+    """(cantidad, enabled) tal como estan en MySQL. Se leen las columnas y no
+    el objeto: el de la sesion del test es la foto de _preparar_venta, y la
+    peticion escribio con OTRA sesion."""
+    fila = (await sesion.execute(
+        select(Articulos.cantidad, Articulos.enabled).where(Articulos.codigo == CODIGO)
+    )).one()
+    return fila.cantidad, fila.enabled
 
 
 # -------------------------------------------------------------------------
@@ -86,6 +104,9 @@ async def test_endpoint_cancelar_venta_sin_nombre_hoy_da_500_y_no_borra(client, 
     # en produccion), asi que esto es lo que quedo en MySQL, no en memoria.
     assert await _contar(sesion, Ventas) == 1
     assert await _contar(sesion, VentaCancelada) == 0
+    # Y el stock NO subio, aunque la suma se hizo antes del INSERT que
+    # revento. Es la atomicidad de las tres escrituras, contra MySQL.
+    assert await _articulo(sesion) == (STOCK_INICIAL, True)
 
 
 # -------------------------------------------------------------------------
@@ -108,3 +129,35 @@ async def test_endpoint_cancelar_venta_con_nombre_da_200(client, autenticar, ses
     # decimal(10,2) en Aiven, double en ventas: MySQL lo devuelve como
     # Decimal y SQLAlchemy (Double en el modelo) lo convierte a float.
     assert cancelacion.importe == pytest.approx(25.90)
+    # Y lo vendido volvio al stock.
+    assert await _articulo(sesion) == (STOCK_INICIAL + VENDIDAS, True)
+
+
+# -------------------------------------------------------------------------
+# Reponer stock (2026-10-18)
+# -------------------------------------------------------------------------
+async def test_cancelar_repone_el_stock_aunque_el_articulo_este_retirado(client, autenticar, sesion):
+    """Retirado o no, se hace lo mismo. El retirado sigue retirado: solo
+    cambia su cantidad, que no se ve en ningun listado."""
+    id_venta = await _preparar_venta(sesion, nameproducto="Ibuprofeno 600mg", enabled=False)
+    autenticar()
+
+    r = await client.delete(f"/ventas/cancelar/{id_venta}", params={"responsable": "admin"})
+
+    assert r.status_code == 200
+    assert await _articulo(sesion) == (STOCK_INICIAL + VENDIDAS, False)
+
+
+async def test_cancelar_dos_veces_no_repone_dos_veces(client, autenticar, sesion):
+    """La venta se borra al cancelarla, asi que la segunda vez no la
+    encuentra: 404, y el stock se queda como tras la primera."""
+    id_venta = await _preparar_venta(sesion, nameproducto="Ibuprofeno 600mg")
+    autenticar()
+
+    primera = await client.delete(f"/ventas/cancelar/{id_venta}", params={"responsable": "admin"})
+    segunda = await client.delete(f"/ventas/cancelar/{id_venta}", params={"responsable": "admin"})
+
+    assert primera.status_code == 200
+    assert segunda.status_code == 404
+    assert await _articulo(sesion) == (STOCK_INICIAL + VENDIDAS, True)
+    assert await _contar(sesion, VentaCancelada) == 1

@@ -85,8 +85,13 @@ class ArticuloService:
             codigo = f"{numero_aleatorio:013d}"
 
             # Verificamos si ya existe
-            existe = await ArticuloRepository.find_by_codigo(session, codigo)
-            if not existe:
+            # LO VIEJO: existe = await ArticuloRepository.find_by_codigo(session, codigo)
+            #
+            # find_by_codigo filtra enabled=True desde el borrado logico, asi que
+            # daria por libre el codigo de un articulo retirado, que la UNIQUE
+            # KEY sigue contando -> IntegrityError en el INSERT. codigo_en_uso
+            # mira todas las filas.
+            if not await ArticuloRepository.codigo_en_uso(session, codigo):
                 return codigo
 
     @staticmethod
@@ -113,12 +118,28 @@ class ArticuloService:
 
     @staticmethod
     async def delete_articulo_by_id(session: AsyncSession, articulo_id: int) -> None:
-        existe = await ArticuloRepository.exists_by_id(session, articulo_id)
-        if not existe:
-            # OBSOLETO: raise ValueError(f"Artículo no encontrado con id: {articulo_id}")
+        """Borrado logico: pone enabled=False, no hace un DELETE fisico.
+
+        Igual que delete_user_by_id. El DELETE de verdad se llevaba todas las
+        ventas del articulo por fk_articulos_ventas (ON DELETE CASCADE). Con
+        enabled=False desaparece de todas las lecturas y su historial se queda.
+
+        find_by_id ya filtra los retirados, asi que un None cubre los dos
+        casos -- no existe, o ya estaba retirado -- y los dos son 404. Por eso
+        borrar dos veces lo mismo da 404 la segunda, y no vuelve a escribir
+        DELETE_PRODUCT en el activity_log.
+        """
+        # LO VIEJO (DELETE fisico, arrastraba las ventas por el cascade):
+        #     existe = await ArticuloRepository.exists_by_id(session, articulo_id)
+        #     if not existe:
+        #         raise ResourceNotFoundException(...)
+        #     await ArticuloRepository.delete_by_id(session, articulo_id)
+        #     await session.commit()
+        articulo = await ArticuloRepository.find_by_id(session, articulo_id)
+        if not articulo:
             raise ResourceNotFoundException(f"Artículo no encontrado con id: {articulo_id}")
 
-        await ArticuloRepository.delete_by_id(session, articulo_id)
+        articulo.enabled = False
         await session.commit()
 
     @staticmethod
