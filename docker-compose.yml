@@ -54,11 +54,12 @@ services:
       # cambiarla sin reconstruir la imagen.
       FORWARDED_ALLOW_IPS: "*"
     ports:
-      # <host>:<contenedor>. Dentro siempre 8001, que es lo que fija PORT en el
-      # Dockerfile y lo que exige Settings. Fuera, lo que diga HOST_PORT: en
-      # Hetzner el 5050 ya es del Java (fp_api), asi que alli va 5051
-      # -- comprobado libre el 12/10/2026 con "ss -ltnp".
-      - "${HOST_PORT:-8001}:8001"
+      # <ip>:<host>:<contenedor>. Dentro siempre 8001, que es lo que fija PORT en
+      # el Dockerfile y lo que exige Settings. Fuera, lo que diga HOST_PORT.
+      # Solo en 127.0.0.1, como el resto de servicios: se entra por el proxy
+      # inverso, nunca directo. Docker escribe en iptables y se salta el
+      # firewall, asi que sin la IP el puerto quedaria abierto a Internet.
+      - "127.0.0.1:${HOST_PORT:-8001}:8001"
     networks:
       - farmacia-ko2-network
 
